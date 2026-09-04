@@ -5,8 +5,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from ortools.sat.python import cp_model
 
-st.set_page_config(page_title="BBA Routine Optimizer - Full Master", layout="wide")
-st.title("BBA Routine Management System | Full Master Generator")
+st.set_page_config(page_title="BBA Routine Optimizer - Master Matrix", layout="wide")
+st.title("BBA Routine Management System | Visual Routine Matrix")
 st.divider()
 
 if 'fac_rules' not in st.session_state:
@@ -16,15 +16,78 @@ if 'batch_rules' not in st.session_state:
 if 'preview_df' not in st.session_state:
     st.session_state.preview_df = None
 
-# --- 1. DATA UPLOAD & AUTOMATIC PARSING ---
-st.subheader("1. Data Upload & Master Initialization")
+# --- 1. DATA UPLOAD & INTELLIGENT PARSING ---
+st.subheader("1. Data Upload & Template Parsing")
 course_file = st.file_uploader("Upload Fall 2026 Course Offering Sheet", type=["xlsx"])
 
 if course_file:
     xls = pd.ExcelFile(course_file)
     target_sheet = next((s for s in xls.sheet_names if 'bba' in s.lower() or 'offer' in s.lower()), xls.sheet_names[0])
-    df_raw = pd.read_excel(xls, sheet_name=target_sheet)
     
+    # Read sheet raw to find data rows and batch headers
+    df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
+    
+    # Clean and parse rows, tracking the current Batch context
+    parsed_rows = []
+    current_batch = "20th Batch"
+    
+    for idx, row in df_raw.iterrows():
+        row_str = " ".join([str(val) for val in row.values if pd.notna(val)])
+        
+        # Detect Batch header rows in the sheet
+        if "batch" in row_str.lower():
+            for val in row.values:
+                if pd.notna(val) and "batch" in str(val).lower():
+                    current_batch = str(val).strip()
+            continue
+            
+        # Look for valid course rows (must contain a course code pattern like 'BBA' or numbers with dashes)
+        row_cells = [str(val).strip() for val in row.values if pd.notna(val)]
+        if len(row_cells) >= 4:
+            # Check if any cell looks like a course code (e.g., contains numbers and letters)
+            potential_code = next((c for c in row_cells if any(char.isdigit() for char in c) and '-' in c), None)
+            if potential_code:
+                # Find course title, teacher, and section based on typical column patterns
+                code_idx = row_cells.index(potential_code)
+                title = row_cells[code_idx + 1] if code_idx + 1 < len(row_cells) else "Course Title"
+                
+                # Search for teacher name (usually later in the row, avoiding semester text)
+                teacher = "TBA"
+                for cell in row_cells[code_idx+2:]:
+                    cell_lower = cell.lower()
+                    if not any(kw in cell_lower for kw in ['semester', 'year', 'cred', '√', 'true', 'false', 'reg', 'week']) and len(cell) > 3:
+                        teacher = cell
+                        break
+                
+                # Search for section info at the end of the row
+                sections = ["A"]
+                sec_raw = row_cells[-1]
+                if sec_raw and len(sec_raw) <= 15 and not 'semester' in sec_raw.lower():
+                    sections = [s.strip() for s in sec_raw.replace(';', ',').split(',') if s.strip()]
+                
+                for sec in sections:
+                    parsed_rows.append({
+                        "Batch": current_batch,
+                        "Section": sec,
+                        "Code": potential_code,
+                        "Title": title,
+                        "Faculty": teacher
+                    })
+
+    # Fallback to standard dataframe parsing if custom detector is empty
+    if not parsed_rows:
+        df_std = pd.read_excel(xls, sheet_name=target_sheet)
+        for _, row in df_std.iterrows():
+            parsed_rows.append({
+                "Batch": str(row.iloc[0]) if pd.notna(row.iloc[0]) else "20th Batch",
+                "Section": "A",
+                "Code": str(row.iloc[2]) if len(row.dropna()) > 2 else "BBA 1101",
+                "Title": str(row.iloc[3]) if len(row.dropna()) > 3 else "Course",
+                "Faculty": str(row.iloc[6]) if len(row.dropna()) > 6 else "TBA"
+            })
+
+    df_tasks = pd.DataFrame(parsed_rows)
+
     # Extract Faculty from Faculty List sheet if available
     faculty_sheet = next((s for s in xls.sheet_names if 'faculty' in s.lower()), None)
     faculty_data = []
@@ -41,8 +104,7 @@ if course_file:
                 faculty_data.append({"Faculty Name": name, "Type": 'Adjunct' if is_adjunct else 'Full-Time'})
     
     if not faculty_data:
-        fac_col = next((c for c in df_raw.columns if 'teacher' in c.lower() or 'name' in c.lower()), None)
-        extracted = df_raw[fac_col].dropna().unique() if fac_col else []
+        extracted = df_tasks['Faculty'].dropna().unique()
         faculty_data = [{"Faculty Name": str(f).strip(), "Type": "Full-Time"} for f in extracted if str(f).strip() != '']
         
     if not any(f['Faculty Name'] == 'TBA' for f in faculty_data):
@@ -59,43 +121,8 @@ if course_file:
     
     st.divider()
 
-    # --- 3. ADVANCED CONSTRAINTS CONFIGURATION ---
-    st.subheader("3. Advanced Scheduling Constraints")
-    col_adv1, col_adv2 = st.columns(2)
-    
-    with col_adv1:
-        st.write("**Individual Faculty Slot Locks & Reservations**")
-        selected_fac = st.selectbox("Select Faculty Member:", available_faculties)
-        rule_day = st.selectbox("Select Day:", ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"])
-        rule_slot = st.selectbox("Select Time Slot:", ["9:30-11:00", "11:00-12:30", "1:30-3:00", "3:00-4:30"])
-        
-        if st.button("➕ Add Faculty Rule"):
-            st.session_state.fac_rules.append({"Faculty": selected_fac, "Day": rule_day, "Slot": rule_slot})
-            st.success(f"Added rule for {selected_fac}")
-            
-        if st.session_state.fac_rules:
-            st.table(pd.DataFrame(st.session_state.fac_rules))
-            if st.button("Clear Faculty Rules"):
-                st.session_state.fac_rules = []
-                st.rerun()
-            
-    with col_adv2:
-        st.write("**Batch Active Day Windows & Blackouts**")
-        selected_batch = st.selectbox("Select Batch:", ["20th", "19th", "18th", "17th", "16th", "15th", "14th"])
-        batch_max_days = st.number_input(f"Max Active Days for {selected_batch}:", min_value=1, max_value=6, value=3)
-        blocked_batch_days = st.multiselect(f"Blocked Days for {selected_batch}:", ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"])
-        
-        if st.button("💾 Save Batch Configuration"):
-            st.session_state.batch_rules[selected_batch] = {"Max Days": batch_max_days, "Blocked Days": blocked_batch_days}
-            st.success(f"Saved configuration for {selected_batch}")
-            
-        if st.session_state.batch_rules:
-            st.json(st.session_state.batch_rules)
-
-    st.divider()
-
-    # --- 4. GLOBAL SETTINGS ---
-    st.subheader("4. Global Engine Settings")
+    # --- 2. GLOBAL SETTINGS ---
+    st.subheader("3. Global Engine Settings")
     g_col1, g_col2 = st.columns(2)
     with g_col1:
         include_majors = st.toggle("Include Major Courses", value=False)
@@ -105,47 +132,25 @@ if course_file:
 
     st.divider()
     
-    # --- 5. FULL SOLVER & PREVIEW EXECUTION ---
+    # --- 4. SOLVER EXECUTION ---
     if st.button("🚀 Generate Full Multi-Batch Master Routine", type="primary", use_container_width=True):
         with st.spinner("Executing OR-Tools CP-SAT multi-batch constraint matrix..."):
             
             master_tasks = []
-            
-            # Robust column mapping
-            col_batch = next((c for c in df_raw.columns if 'batch' in c.lower()), df_raw.columns[0])
-            col_code = next((c for c in df_raw.columns if 'code' in c.lower()), df_raw.columns[2])
-            col_title = next((c for c in df_raw.columns if 'title' in c.lower()), df_raw.columns[3])
-            col_teacher = next((c for c in df_raw.columns if 'teacher' in c.lower() or 'name' in c.lower()), df_raw.columns[6])
-            col_section = next((c for c in df_raw.columns if 'section' in c.lower()), df_raw.columns[-1])
-            
-            for idx, row in df_raw.iterrows():
-                b_val = str(row.get(col_batch, "20th")).strip()
-                if b_val.lower() in ['nan', '', 'none']:
-                    b_val = "20th Batch"
-                c_code = str(row.get(col_code, "")).strip()
-                c_title = str(row.get(col_title, "")).strip()
-                
-                if not c_code or c_code.lower() == 'nan':
-                    continue
+            for _, row in df_tasks.iterrows():
+                teacher = row['Faculty']
+                if teacher.lower() in ['nan', '', 'none', 'tba'] and replace_tba and tba_replacement:
+                    teacher = tba_replacement
+                elif teacher.lower() in ['nan', '', 'none']:
+                    teacher = "TBA"
                     
-                teacher = str(row.get(col_teacher, "TBA")).strip()
-                if teacher.lower() in ['nan', '', 'none']:
-                    teacher = tba_replacement if replace_tba and tba_replacement else "TBA"
-                
-                sec_raw = str(row.get(col_section, "A"))
-                if sec_raw.lower() in ['nan', 'none', '']:
-                    sec_raw = "A"
-                    
-                sections = [s.strip() for s in sec_raw.replace(';', ',').split(',') if s.strip()]
-                
-                for sec in sections:
-                    master_tasks.append({
-                        "Batch": b_val,
-                        "Section": sec,
-                        "Code": c_code,
-                        "Title": c_title,
-                        "Faculty": teacher
-                    })
+                master_tasks.append({
+                    "Batch": row['Batch'],
+                    "Section": row['Section'],
+                    "Code": row['Code'],
+                    "Title": row['Title'],
+                    "Faculty": teacher
+                })
             
             # CP-SAT Solver Core
             model = cp_model.CpModel()
@@ -202,7 +207,6 @@ if course_file:
                             })
                             assigned = True
                 if not assigned:
-                    # Fallback distribution
                     d = all_days[i % len(all_days)]
                     s = time_slots[(i // len(all_days)) % len(time_slots)]
                     scheduled_output.append({
@@ -217,13 +221,41 @@ if course_file:
             st.session_state.preview_df = pd.DataFrame(scheduled_output)
             st.success("Full Multi-Batch Master Routine Generated Successfully!")
 
-    # --- 6. IN-APP PREVIEW & EXCEL EXPORT ---
+    # --- 5. VISUAL GRID VIEW & EXCEL EXPORT ---
     if st.session_state.preview_df is not None:
-        st.subheader("📊 Full Master Routine Preview Window")
-        st.info("Review all batches, sections, and faculty assignments below before downloading.")
-        st.dataframe(st.session_state.preview_df, use_container_width=True)
+        st.subheader("📊 Visual Routine Matrix (Grid View)")
+        st.info("Switch between the List View and the visual Matrix Grid view below to check your schedule layout.")
         
-        # Build Master OpenPyXL Excel File
+        view_mode = st.radio("Select View Mode:", ["Grid View (Matrix)", "List View (Master Table)"], horizontal=True)
+        
+            if view_mode == "Grid View (Matrix)":
+            # Create a pivot table matrix: Rows = Time Slots, Columns = Days, Values = Course & Faculty strings
+            df_p = st.session_state.preview_df.copy()
+            df_p['CellContent'] = df_p['Course Code'] + "\n(" + df_p['Course Title'] + ")\n👨‍🏫 " + df_p['Faculty']
+            
+            selected_batch_filter = st.selectbox("Select Batch to Inspect on Grid:", df_p['Batch & Section'].unique())
+            df_filtered = df_p[df_p['Batch & Section'] == selected_batch_filter]
+            
+            # Pivot table mapping time slots to days
+            pivot_grid = df_filtered.pivot_table(
+                index="Time Slot", 
+                columns="Day", 
+                values="CellContent", 
+                aggfunc=lambda x: ' | '.join(x)
+            )
+            
+            # Reorder columns to standard sequence
+            standard_days = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
+            existing_days = [d for d in standard_days if d in pivot_grid.columns]
+            pivot_grid = pivot_grid[existing_days]
+            
+            st.markdown(f"### Routine Matrix for: **{selected_batch_filter}**")
+            st.dataframe(pivot_grid, use_container_width=True)
+            
+        else:
+            st.dataframe(st.session_state.preview_df, use_container_width=True)
+        
+        # Build Master OpenPyXL Excel File matching template format
         wb = Workbook()
         ws = wb.active
         ws.title = "Fall 2026 Master Routine"
@@ -248,14 +280,9 @@ if course_file:
             ws.cell(row=row_num, column=2, value=row_data["Day"]).border = thin_border
             ws.cell(row=row_num, column=3, value=row_data["Time Slot"]).border = thin_border
             
-            c_cell = ws.cell(row=row_num, column=4, value=row_data['Course Code'])
-            c_cell.border = thin_border
-            
-            t_cell = ws.cell(row=row_num, column=5, value=row_data['Course Title'])
-            t_cell.border = thin_border
-            
-            f_cell = ws.cell(row=row_num, column=6, value=row_data['Faculty'])
-            f_cell.border = thin_border
+            ws.cell(row=row_num, column=4, value=row_data['Course Code']).border = thin_border
+            ws.cell(row=row_num, column=5, value=row_data['Course Title']).border = thin_border
+            ws.cell(row=row_num, column=6, value=row_data['Faculty']).border = thin_border
             
         output = BytesIO()
         wb.save(output)
