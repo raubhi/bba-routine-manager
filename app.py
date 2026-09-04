@@ -151,14 +151,20 @@ if course_file:
 
     # --- 3. GLOBAL ENGINE SETTINGS ---
     st.subheader("4. Global Engine Settings")
-    replace_tba = st.toggle("Convert TBA slots to an assigned Faculty member?", value=False)
-    tba_replacement = st.selectbox("TBA Replacement Faculty:", available_faculties) if replace_tba else None
+    
+    col_g1, col_g2 = st.columns(2)
+    with col_g1:
+        replace_tba = st.toggle("Convert TBA slots to an assigned Faculty member?", value=False)
+        tba_replacement = st.selectbox("TBA Replacement Faculty:", available_faculties) if replace_tba else None
+    with col_g2:
+        st.info("Limit the maximum number of classes that can occur simultaneously across the entire university in a single time slot.")
+        total_rooms = st.number_input("Total Available Rooms per Time Slot:", min_value=1, max_value=30, value=6, step=1)
 
     st.divider()
     
     # --- 4. SOLVER EXECUTION ---
     if st.button("🚀 Generate Full Multi-Batch Master Routine", type="primary", use_container_width=True):
-        with st.spinner("Compiling Math Engine and optimizing zero clashes..."):
+        with st.spinner(f"Compiling Math Engine... (Enforcing maximum {total_rooms} simultaneous rooms)"):
             
             master_tasks = []
             for _, row in df_tasks.iterrows():
@@ -185,15 +191,20 @@ if course_file:
             for i in range(len(master_tasks)):
                 model.AddExactlyOne(x[(i, d, s)] for d in days_ordered for s in slots_ordered)
                 
-            # CLASH PREVENTION
+            # CLASH PREVENTION & ROOM LIMITS
             for d in days_ordered:
                 for s in slots_ordered:
+                    # Room Capacity Constraint
+                    model.Add(sum(x[(i, d, s)] for i in range(len(master_tasks))) <= total_rooms)
+                    
+                    # Cohort Clash
                     batch_sec_map = {}
                     for i, t in enumerate(master_tasks):
                         batch_sec_map.setdefault(t['Batch'], []).append(i)
                     for indices in batch_sec_map.values():
                         model.AddAtMostOne(x[(i, d, s)] for i in indices)
                         
+                    # Faculty Clash
                     fac_map = {}
                     for i, t in enumerate(master_tasks):
                         if t["Faculty"] != "TBA":
@@ -251,9 +262,9 @@ if course_file:
                                     "Faculty": t['Faculty']
                                 })
                 st.session_state.preview_data = scheduled_output
-                st.success("Routine Generated! Zero Clashes Confirmed.")
+                st.success(f"Routine Generated! Successfully constrained within {total_rooms} maximum simultaneous rooms.")
             else:
-                st.error("❌ Impossible Constraints. Please loosen rules and try again.")
+                st.error("❌ Impossible Constraints. The global room limit may be too tight for the active day caps you set. Increase available rooms or allow batches to operate on more days.")
 
     # --- 5. TABBED VIEWS & EXCEL EXPORT ---
     if st.session_state.preview_data is not None:
@@ -365,31 +376,35 @@ if course_file:
             )
 
         with tab2:
-            st.info("Select one or more faculty members to isolate their specific schedules.")
+            st.info("Select one or more faculty members to view their specific schedules side-by-side in a single grid.")
             active_facs = sorted(list(set(row["Faculty"] for row in st.session_state.preview_data)))
-            selected_facs = st.multiselect("Select Faculty:", active_facs)
+            selected_facs = st.multiselect("Select Faculty to compare:", active_facs)
             
             if selected_facs:
-                for fac in selected_facs:
-                    st.markdown(f"#### 📅 Routine for: {fac}")
-                    fac_grid = {s: {d: "" for d in days_ordered} for s in slots_ordered}
-                    for row in st.session_state.preview_data:
-                        if row["Faculty"] == fac:
-                            fac_grid[row["Time Slot"]][row["Day"]] = f"<b>{row['Course Code']}</b><br>{row['Batch']}"
-                            
-                    fac_html = "<div style='overflow-x:auto; margin-bottom: 30px;'><table style='width:100%; border-collapse: collapse; text-align: center; font-size: 13px; font-family: sans-serif;'>"
-                    fac_html += "<tr><th style='border: 1px solid #ccc; background-color: #e9ecef; padding: 10px;'>Time Slot</th>"
-                    for d in days_ordered:
-                        fac_html += f"<th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>{d}</th>"
-                    fac_html += "</tr>"
-                    
-                    for s in slots_ordered:
+                # Unified Faculty Grid Logic
+                fac_grid = {d: {s: {f: "" for f in selected_facs} for s in slots_ordered} for d in days_ordered}
+                for row in st.session_state.preview_data:
+                    fac = row["Faculty"]
+                    if fac in selected_facs:
+                        fac_grid[row["Day"]][row["Time Slot"]][fac] = f"<b>{row['Course Code']}</b><br>{row['Batch']}"
+
+                fac_html = "<div style='overflow-x:auto;'><table style='width:100%; border-collapse: collapse; text-align: center; font-size: 13px; font-family: sans-serif;'>"
+                fac_html += "<tr><th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>Day</th>"
+                fac_html += "<th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>Time Slot</th>"
+                for f in selected_facs:
+                    fac_html += f"<th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>{f}</th>"
+                fac_html += "</tr>"
+                
+                for d in days_ordered:
+                    for i, s in enumerate(slots_ordered):
                         fac_html += "<tr>"
-                        fac_html += f"<td style='border: 1px solid #ccc; background-color: #e9ecef; padding: 8px; white-space: nowrap; font-weight:bold;'>{s}</td>"
-                        for d in days_ordered:
-                            val = fac_grid[s][d]
+                        if i == 0:
+                            fac_html += f"<td rowspan='4' style='border: 1px solid #ccc; font-weight: bold; background-color: #f8f9fa; vertical-align: middle;'>{d}</td>"
+                        fac_html += f"<td style='border: 1px solid #ccc; background-color: #e9ecef; padding: 8px; white-space: nowrap;'>{s}</td>"
+                        for f in selected_facs:
+                            val = fac_grid[d][s][f]
                             bg = "#e6f2ff" if val else "#ffffff"
-                            fac_html += f"<td style='border: 1px solid #ccc; padding: 10px; background-color: {bg}; min-width: 120px;'>{val}</td>"
+                            fac_html += f"<td style='border: 1px solid #ccc; padding: 10px; background-color: {bg}; min-width: 150px;'>{val}</td>"
                         fac_html += "</tr>"
-                    fac_html += "</table></div>"
-                    st.markdown(fac_html, unsafe_allow_html=True)
+                fac_html += "</table></div>"
+                st.markdown(fac_html, unsafe_allow_html=True)
