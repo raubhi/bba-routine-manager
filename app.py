@@ -5,6 +5,7 @@ from io import BytesIO
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from ortools.sat.python import cp_model
+import math
 
 st.set_page_config(page_title="BBA Routine Optimizer - Complete Matrix", layout="wide")
 st.title("BBA Routine Management System | Complete Matrix Engine")
@@ -86,10 +87,12 @@ if course_file:
             code_idx = row_vals.index(code_val)
             title = row_vals[code_idx + 1] if code_idx + 1 < len(row_vals) else "Unknown Course"
             
+            # FIXED UNLIMITED SECTION PARSER
             sections = ["A"]
             last_val = row_vals[-1]
-            if len(last_val) <= 10 and not any(w in last_val.lower() for w in ['semester', 'year', 'cred']):
-                sections = [s.strip() for s in last_val.replace(';', ',').split(',') if s.strip()]
+            if not any(w in last_val.lower() for w in ['semester', 'year', 'cred', 'total', 'th', 'st', 'nd', 'rd', 'batch']):
+                sec_clean = last_val.replace(';', ',').replace('&', ',').replace('and', ',')
+                sections = [s.strip() for s in sec_clean.split(',') if s.strip()]
                 search_space = row_vals[code_idx+2:-1] 
             else:
                 search_space = row_vals[code_idx+2:]
@@ -197,7 +200,6 @@ if course_file:
 
     with tab_sunmon:
         st.write("**Force 3 Classes on Sunday & Monday**")
-        st.info("⚠️ Faculty selected here will be mathematically forced to take EXACTLY 3 classes on Sunday and EXACTLY 3 classes on Monday.")
         col_sm1, col_sm2 = st.columns([1, 2])
         with col_sm1:
             sm_fac = st.selectbox("Select Faculty:", available_faculties, key="sm_fac_sel")
@@ -217,42 +219,62 @@ if course_file:
 
     # --- 3. GLOBAL ENGINE SETTINGS ---
     st.subheader("4. Global Engine Settings")
-    
     col_g1, col_g2 = st.columns(2)
     with col_g1:
         include_majors = st.toggle("Include Major Courses (Uncheck to drop)", value=False)
-        compact_schedule = st.toggle("Enforce Compact Scheduling (Prevent extreme gaps for faculty)", value=True)
+        compact_schedule = st.toggle("Enforce Compact Scheduling (Prevent extreme gaps)", value=True)
         replace_tba = st.toggle("Convert TBA slots to an assigned Faculty member?", value=False)
         tba_replacement = st.selectbox("TBA Replacement Faculty:", available_faculties) if replace_tba else None
     with col_g2:
-        st.info("Limit the maximum number of classes that can occur simultaneously across the entire university in a single time slot.")
         total_rooms = st.number_input("Total Available Rooms per Time Slot:", min_value=1, max_value=30, value=6, step=1)
 
     st.divider()
     
-    # --- 4. SOLVER EXECUTION ---
+    # --- 4. PRE-DIAGNOSTICS & SOLVER EXECUTION ---
     if st.button("🚀 Generate Full Multi-Batch Master Routine", type="primary", use_container_width=True):
-        with st.spinner(f"Compiling Math Engine... (Enforcing {total_rooms} rooms, Sun/Mon Locks, and Compact Scheduling)"):
+        
+        master_tasks = []
+        for _, row in df_tasks.iterrows():
+            if not include_majors and "major" in row['Title'].lower():
+                continue
+            teacher = row['Faculty']
+            if teacher.lower() == 'tba' and replace_tba and tba_replacement:
+                teacher = tba_replacement
+            master_tasks.append({
+                "Batch": row['Batch'],
+                "Code": row['Code'],
+                "Title": row['Title'],
+                "Faculty": teacher
+            })
             
-            master_tasks = []
-            for _, row in df_tasks.iterrows():
-                # Major Filtering Drop Logic
-                if not include_majors and "major" in row['Title'].lower():
-                    continue
-                    
-                teacher = row['Faculty']
-                if teacher.lower() == 'tba' and replace_tba and tba_replacement:
-                    teacher = tba_replacement
-                    
-                master_tasks.append({
-                    "Batch": row['Batch'],
-                    "Code": row['Code'],
-                    "Title": row['Title'],
-                    "Faculty": teacher
-                })
+        # --- VISUAL PRE-GENERATION DIAGNOSTICS ---
+        fac_counts = {}
+        for t in master_tasks:
+            fac_counts[t["Faculty"]] = fac_counts.get(t["Faculty"], 0) + 1
             
+        diagnostic_errors = []
+        
+        # 1. Check Sun/Mon rule viability
+        for sm_fac in st.session_state.sun_mon_facs:
+            assigned = fac_counts.get(sm_fac, 0)
+            if assigned < 6:
+                diagnostic_errors.append(f"👨‍🏫 **{sm_fac}** is locked to take 6 classes on Sun/Mon, but the Excel sheet only assigns them **{assigned}** section(s).")
+                
+        # 2. Check total room capacity
+        total_slots = len(days_ordered) * len(slots_ordered)
+        max_possible_classes = total_slots * total_rooms
+        if len(master_tasks) > max_possible_classes:
+            diagnostic_errors.append(f"🏢 **Not Enough Rooms:** You have **{len(master_tasks)}** total sections to schedule, but {total_rooms} rooms only allows a maximum of **{max_possible_classes}** classes per week.")
+            
+        if diagnostic_errors:
+            st.error("❌ **Pre-Generation Diagnostic Failed:** Please fix these mathematical contradictions before running the solver.")
+            for e in diagnostic_errors:
+                st.warning(e)
+            st.stop()
+            
+        # --- MATH SOLVER ---
+        with st.spinner("Diagnostics Passed. Compiling Math Engine and Optimizing..."):
             model = cp_model.CpModel()
-            
             x = {}
             for i in range(len(master_tasks)):
                 for d in days_ordered:
@@ -264,17 +286,14 @@ if course_file:
                 
             for d in days_ordered:
                 for s in slots_ordered:
-                    # Global Room Limit Constraint
                     model.Add(sum(x[(i, d, s)] for i in range(len(master_tasks))) <= total_rooms)
                     
-                    # Batch Clash Prevention
                     batch_sec_map = {}
                     for i, t in enumerate(master_tasks):
                         batch_sec_map.setdefault(t['Batch'], []).append(i)
                     for indices in batch_sec_map.values():
                         model.AddAtMostOne(x[(i, d, s)] for i in indices)
                         
-                    # Faculty Clash Prevention
                     fac_map = {}
                     for i, t in enumerate(master_tasks):
                         if t["Faculty"] != "TBA":
@@ -282,7 +301,6 @@ if course_file:
                     for indices in fac_map.values():
                         model.AddAtMostOne(x[(i, d, s)] for i in indices)
 
-            # RULE 1: FACULTY DAILY MAX & OFF-DAYS
             active_facs = list(set(t["Faculty"] for t in master_tasks if t["Faculty"] != "TBA"))
             for _, f_row in edited_faculty.iterrows():
                 fac_name = f_row["Faculty Name"]
@@ -293,21 +311,18 @@ if course_file:
                     max_cap = int(f_row[f"{d} Max"])
                     model.Add(sum(x[(i, d, s)] for i in f_indices for s in slots_ordered) <= max_cap)
 
-            # RULE 2: SPECIFIC SLOT LOCKS
             for rule in st.session_state.fac_rules:
                 r_fac, r_day, r_slot = rule["Faculty"], rule["Day"], rule["Slot"]
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == r_fac]
                 if f_indices:
                     model.Add(sum(x[(i, r_day, r_slot)] for i in f_indices) == 1)
 
-            # RULE 3: SUN/MON FORCED CLASSES
             for sm_fac in st.session_state.sun_mon_facs:
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == sm_fac]
                 if f_indices:
                     model.Add(sum(x[(i, "Sunday", s)] for i in f_indices for s in slots_ordered) == 3)
                     model.Add(sum(x[(i, "Monday", s)] for i in f_indices for s in slots_ordered) == 3)
 
-            # RULE 4: BATCH DAY LIMITS & BLACKOUTS
             for b_key, rules in st.session_state.batch_rules.items():
                 b_indices = [i for i, t in enumerate(master_tasks) if t["Batch"] == b_key]
                 if not b_indices: continue
@@ -322,7 +337,6 @@ if course_file:
                     b_active_vars.append(day_active)
                 model.Add(sum(b_active_vars) <= rules["Max Days"])
 
-            # RULE 5: COMPACT SCHEDULING (PREVENT EXTREME GAPS)
             if compact_schedule:
                 for f in active_facs:
                     f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == f]
@@ -331,7 +345,6 @@ if course_file:
                         s2 = sum(x[(i, d, slots_ordered[1])] for i in f_indices)
                         s3 = sum(x[(i, d, slots_ordered[2])] for i in f_indices)
                         s4 = sum(x[(i, d, slots_ordered[3])] for i in f_indices)
-                        # If a teacher has Slot 1 AND Slot 4, they MUST have Slot 2 or Slot 3.
                         model.Add(s1 + s4 <= 1 + s2 + s3)
 
             solver = cp_model.CpSolver()
@@ -353,9 +366,9 @@ if course_file:
                                     "Faculty": t['Faculty']
                                 })
                 st.session_state.preview_data = scheduled_output
-                st.success(f"Routine Generated! Successfully constrained within {total_rooms} rooms, prevented massive gaps, and applied Sun/Mon blocks.")
+                st.success(f"Routine Generated! Scheduled {len(master_tasks)} courses across {total_rooms} rooms.")
             else:
-                st.error("❌ Impossible Constraints. Ensure faculties assigned to the Sun/Mon block have enough assigned courses. Adjust limits and try again.")
+                st.error("❌ Impossible Constraints. Ensure batch blackouts aren't forcing too many classes into a single day.")
 
     # --- 5. TABBED VIEWS & EXCEL EXPORT ---
     if st.session_state.preview_data is not None:
