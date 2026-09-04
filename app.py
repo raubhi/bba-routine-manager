@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import json
 from io import BytesIO
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
@@ -9,18 +10,58 @@ st.set_page_config(page_title="BBA Routine Optimizer - Master Matrix", layout="w
 st.title("BBA Routine Management System | Master Matrix Engine")
 st.divider()
 
+# --- INITIALIZE PERSISTENT SESSION STATES ---
 if 'fac_rules' not in st.session_state:
     st.session_state.fac_rules = []
 if 'batch_rules' not in st.session_state:
     st.session_state.batch_rules = {}
+if 'sun_mon_facs' not in st.session_state:
+    st.session_state.sun_mon_facs = []
 if 'preview_data' not in st.session_state:
     st.session_state.preview_data = None
+if 'current_file_id' not in st.session_state:
+    st.session_state.current_file_id = None
+if 'base_fac_df' not in st.session_state:
+    st.session_state.base_fac_df = None
+
+# --- CONFIGURATION MANAGER (SAVE/LOAD) ---
+st.subheader("💾 Configuration Manager (Save/Load Rules)")
+col_conf1, col_conf2 = st.columns(2)
+with col_conf1:
+    config_dict = {
+        "fac_rules": st.session_state.fac_rules,
+        "batch_rules": st.session_state.batch_rules,
+        "sun_mon_facs": st.session_state.sun_mon_facs
+    }
+    st.download_button(
+        label="📥 Download Saved Rules (.json)",
+        data=json.dumps(config_dict),
+        file_name="bba_routine_rules.json",
+        mime="application/json"
+    )
+with col_conf2:
+    uploaded_config = st.file_uploader("📤 Upload Saved Rules (.json)", type=["json"])
+    if uploaded_config:
+        loaded_conf = json.load(uploaded_config)
+        st.session_state.fac_rules = loaded_conf.get("fac_rules", [])
+        st.session_state.batch_rules = loaded_conf.get("batch_rules", {})
+        st.session_state.sun_mon_facs = loaded_conf.get("sun_mon_facs", [])
+        st.success("Rules successfully loaded! They will apply to the next generation.")
+
+st.divider()
 
 # --- 1. DATA UPLOAD & PARSING ---
 st.subheader("1. Data Upload & Template Parsing")
 course_file = st.file_uploader("Upload Fall 2026 Course Offering Sheet", type=["xlsx"])
 
 if course_file:
+    # Detect new file upload to reset the faculty matrix state
+    file_id = f"{course_file.name}_{course_file.size}"
+    is_new_file = False
+    if st.session_state.current_file_id != file_id:
+        st.session_state.current_file_id = file_id
+        is_new_file = True
+
     xls = pd.ExcelFile(course_file)
     target_sheet = next((s for s in xls.sheet_names if 'bba' in s.lower() or 'offer' in s.lower()), xls.sheet_names[0])
     df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
@@ -72,86 +113,112 @@ if course_file:
 
     df_tasks = pd.DataFrame(parsed_rows)
 
-    faculty_sheet = next((s for s in xls.sheet_names if 'faculty' in s.lower()), None)
-    faculty_data = []
-    if faculty_sheet:
-        df_fac = pd.read_excel(xls, sheet_name=faculty_sheet)
-        is_adjunct = False
-        for _, row in df_fac.iterrows():
-            first_col = str(row.iloc[0]).strip().lower()
-            if first_col == 'contractual':
-                is_adjunct = True
-                continue
-            name = str(row.iloc[1]).strip()
-            if name.lower() not in ['nan', 'name', '']:
-                faculty_data.append({"Faculty Name": name, "Type": 'Adjunct' if is_adjunct else 'Full-Time'})
-    
-    if not faculty_data:
-        extracted = df_tasks['Faculty'].dropna().unique()
-        faculty_data = [{"Faculty Name": str(f).strip(), "Type": "Full-Time"} for f in extracted if str(f).strip() != '']
+    # Initialize Base Faculty Matrix only once per file to prevent resetting user edits
+    if is_new_file or st.session_state.base_fac_df is None:
+        faculty_sheet = next((s for s in xls.sheet_names if 'faculty' in s.lower()), None)
+        faculty_data = []
+        if faculty_sheet:
+            df_fac = pd.read_excel(xls, sheet_name=faculty_sheet)
+            is_adjunct = False
+            for _, row in df_fac.iterrows():
+                first_col = str(row.iloc[0]).strip().lower()
+                if first_col == 'contractual':
+                    is_adjunct = True
+                    continue
+                name = str(row.iloc[1]).strip()
+                if name.lower() not in ['nan', 'name', '']:
+                    faculty_data.append({"Faculty Name": name, "Type": 'Adjunct' if is_adjunct else 'Full-Time'})
         
-    if not any(f['Faculty Name'] == 'TBA' for f in faculty_data):
-        faculty_data.append({"Faculty Name": "TBA", "Type": "Adjunct"})
-        
-    fac_df = pd.DataFrame(faculty_data)
+        if not faculty_data:
+            extracted = df_tasks['Faculty'].dropna().unique()
+            faculty_data = [{"Faculty Name": str(f).strip(), "Type": "Full-Time"} for f in extracted if str(f).strip() != '']
+            
+        if not any(f['Faculty Name'] == 'TBA' for f in faculty_data):
+            faculty_data.append({"Faculty Name": "TBA", "Type": "Adjunct"})
+            
+        fac_df = pd.DataFrame(faculty_data)
+        for day in ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]:
+            fac_df[f"{day} Max"] = 3
+            
+        st.session_state.base_fac_df = fac_df
+
     days_ordered = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
     slots_ordered = ["9:30-11:00", "11:00-12:30", "1:30-3:00", "3:00-4:30"]
 
-    for day in days_ordered:
-        fac_df[f"{day} Max"] = 3
-        
-    st.subheader("2. Faculty Roster & Daily Limits Configuration")
+    st.subheader("2. Persistent Faculty Roster & Daily Limits Matrix")
     col_config = {"Type": st.column_config.SelectboxColumn("Type", options=["Full-Time", "Adjunct"], required=True)}
     for day in days_ordered:
         col_config[f"{day} Max"] = st.column_config.NumberColumn(f"{day} Max", min_value=0, max_value=6, step=1)
     
-    edited_faculty = st.data_editor(fac_df, num_rows="dynamic", column_config=col_config, use_container_width=True)
+    # Render Editor and immediately save modifications back to session memory
+    edited_faculty = st.data_editor(st.session_state.base_fac_df, num_rows="dynamic", column_config=col_config, use_container_width=True)
+    st.session_state.base_fac_df = edited_faculty 
+    
     available_faculties = edited_faculty[edited_faculty['Faculty Name'] != 'TBA']['Faculty Name'].tolist()
     
     st.divider()
 
-    # --- 2. ADVANCED RULES ---
+    # --- 2. ADVANCED RULES (TABBED ENVIRONMENT) ---
     st.subheader("3. Advanced Scheduling Constraints")
-    col_adv1, col_adv2 = st.columns(2)
+    tab_locks, tab_batches, tab_sunmon = st.tabs(["Specific Slot Locks", "Batch Limits & Blackouts", "Sun/Mon Forced Load"])
     
-    with col_adv1:
+    with tab_locks:
         st.write("**Specific Faculty Slot Locks**")
-        selected_fac = st.selectbox("Select Faculty Member:", available_faculties)
-        rule_day = st.selectbox("Select Day:", days_ordered)
-        rule_slot = st.selectbox("Select Time Slot:", slots_ordered)
-        
-        if st.button("➕ Lock Faculty to Slot"):
-            st.session_state.fac_rules.append({"Faculty": selected_fac, "Day": rule_day, "Slot": rule_slot})
-            st.success(f"Locked {selected_fac} to {rule_day} at {rule_slot}")
-            
-        if st.session_state.fac_rules:
-            st.table(pd.DataFrame(st.session_state.fac_rules))
-            if st.button("Clear Faculty Locks"):
-                st.session_state.fac_rules = []
+        col_t1, col_t2 = st.columns([1, 2])
+        with col_t1:
+            selected_fac = st.selectbox("Select Faculty:", available_faculties, key="l_fac")
+            rule_day = st.selectbox("Select Day:", days_ordered, key="l_day")
+            rule_slot = st.selectbox("Select Time Slot:", slots_ordered, key="l_slot")
+            if st.button("➕ Lock Faculty to Slot"):
+                st.session_state.fac_rules.append({"Faculty": selected_fac, "Day": rule_day, "Slot": rule_slot})
                 st.rerun()
+        with col_t2:
+            if st.session_state.fac_rules:
+                st.table(pd.DataFrame(st.session_state.fac_rules))
+                if st.button("Clear All Faculty Locks"):
+                    st.session_state.fac_rules = []
+                    st.rerun()
             
-    with col_adv2:
+    with tab_batches:
         st.write("**Batch Day Limits & Blackouts**")
-        target_batches = st.multiselect("Select Batch(es):", df_tasks['Batch'].unique().tolist())
-        batch_max_days = st.number_input(f"Max Active Days:", min_value=1, max_value=6, value=3)
-        blocked_batch_days = st.multiselect(f"Strictly Block Days:", days_ordered)
-        
-        if st.button("💾 Save Batch Configuration"):
-            for b in target_batches:
-                st.session_state.batch_rules[b] = {"Max Days": batch_max_days, "Blocked Days": blocked_batch_days}
-            st.success(f"Configuration saved!")
-            
-        if st.session_state.batch_rules:
-            st.json(st.session_state.batch_rules)
-            if st.button("Clear Batch Rules"):
-                st.session_state.batch_rules = {}
+        col_b1, col_b2 = st.columns([1, 2])
+        with col_b1:
+            target_batches = st.multiselect("Select Batch(es):", df_tasks['Batch'].unique().tolist())
+            batch_max_days = st.number_input(f"Max Active Days:", min_value=1, max_value=6, value=3)
+            blocked_batch_days = st.multiselect(f"Strictly Block Days:", days_ordered)
+            if st.button("💾 Save Batch Configuration"):
+                for b in target_batches:
+                    st.session_state.batch_rules[b] = {"Max Days": batch_max_days, "Blocked Days": blocked_batch_days}
                 st.rerun()
+        with col_b2:
+            if st.session_state.batch_rules:
+                st.json(st.session_state.batch_rules)
+                if st.button("Clear All Batch Rules"):
+                    st.session_state.batch_rules = {}
+                    st.rerun()
+
+    with tab_sunmon:
+        st.write("**Force 3 Classes on Sunday & Monday**")
+        st.info("⚠️ Faculty selected here will be mathematically forced to take EXACTLY 3 classes on Sunday and EXACTLY 3 classes on Monday. Ensure they are assigned at least 6 classes in the Excel sheet.")
+        col_sm1, col_sm2 = st.columns([1, 2])
+        with col_sm1:
+            sm_fac = st.selectbox("Select Faculty:", available_faculties, key="sm_fac_sel")
+            if st.button("➕ Force Sun/Mon 3-Class Load"):
+                if sm_fac not in st.session_state.sun_mon_facs:
+                    st.session_state.sun_mon_facs.append(sm_fac)
+                    st.rerun()
+        with col_sm2:
+            if st.session_state.sun_mon_facs:
+                st.write("**Currently Forced Faculties:**")
+                st.write(st.session_state.sun_mon_facs)
+                if st.button("Clear Sun/Mon Locks"):
+                    st.session_state.sun_mon_facs = []
+                    st.rerun()
 
     st.divider()
 
     # --- 3. GLOBAL ENGINE SETTINGS ---
     st.subheader("4. Global Engine Settings")
-    
     col_g1, col_g2 = st.columns(2)
     with col_g1:
         replace_tba = st.toggle("Convert TBA slots to an assigned Faculty member?", value=False)
@@ -164,7 +231,7 @@ if course_file:
     
     # --- 4. SOLVER EXECUTION ---
     if st.button("🚀 Generate Full Multi-Batch Master Routine", type="primary", use_container_width=True):
-        with st.spinner(f"Compiling Math Engine... (Enforcing maximum {total_rooms} simultaneous rooms)"):
+        with st.spinner(f"Compiling Math Engine... (Enforcing {total_rooms} rooms & Sun/Mon Locks)"):
             
             master_tasks = []
             for _, row in df_tasks.iterrows():
@@ -187,17 +254,15 @@ if course_file:
                     for s in slots_ordered:
                         x[(i, d, s)] = model.NewBoolVar(f"x_{i}_{d}_{s}")
                         
-            # EXACTLY ONCE
             for i in range(len(master_tasks)):
                 model.AddExactlyOne(x[(i, d, s)] for d in days_ordered for s in slots_ordered)
                 
-            # CLASH PREVENTION & ROOM LIMITS
             for d in days_ordered:
                 for s in slots_ordered:
-                    # Room Capacity Constraint
+                    # Global Room Limit Constraint
                     model.Add(sum(x[(i, d, s)] for i in range(len(master_tasks))) <= total_rooms)
                     
-                    # Cohort Clash
+                    # Batch Clash
                     batch_sec_map = {}
                     for i, t in enumerate(master_tasks):
                         batch_sec_map.setdefault(t['Batch'], []).append(i)
@@ -212,7 +277,7 @@ if course_file:
                     for indices in fac_map.values():
                         model.AddAtMostOne(x[(i, d, s)] for i in indices)
 
-            # FACULTY RULES
+            # RULE 1: FACULTY DAILY MAX & OFF-DAYS
             for _, f_row in edited_faculty.iterrows():
                 fac_name = f_row["Faculty Name"]
                 if fac_name == "TBA": continue
@@ -222,13 +287,21 @@ if course_file:
                     max_cap = int(f_row[f"{d} Max"])
                     model.Add(sum(x[(i, d, s)] for i in f_indices for s in slots_ordered) <= max_cap)
 
+            # RULE 2: SPECIFIC SLOT LOCKS
             for rule in st.session_state.fac_rules:
                 r_fac, r_day, r_slot = rule["Faculty"], rule["Day"], rule["Slot"]
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == r_fac]
                 if f_indices:
                     model.Add(sum(x[(i, r_day, r_slot)] for i in f_indices) == 1)
 
-            # BATCH RULES
+            # RULE 3: SUN/MON FORCED CLASSES
+            for sm_fac in st.session_state.sun_mon_facs:
+                f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == sm_fac]
+                if f_indices:
+                    model.Add(sum(x[(i, "Sunday", s)] for i in f_indices for s in slots_ordered) == 3)
+                    model.Add(sum(x[(i, "Monday", s)] for i in f_indices for s in slots_ordered) == 3)
+
+            # RULE 4: BATCH DAY LIMITS
             for b_key, rules in st.session_state.batch_rules.items():
                 b_indices = [i for i, t in enumerate(master_tasks) if t["Batch"] == b_key]
                 if not b_indices: continue
@@ -244,7 +317,7 @@ if course_file:
                 model.Add(sum(b_active_vars) <= rules["Max Days"])
 
             solver = cp_model.CpSolver()
-            solver.parameters.max_time_in_seconds = 15.0
+            solver.parameters.max_time_in_seconds = 20.0
             status = solver.Solve(model)
             
             if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
@@ -262,9 +335,9 @@ if course_file:
                                     "Faculty": t['Faculty']
                                 })
                 st.session_state.preview_data = scheduled_output
-                st.success(f"Routine Generated! Successfully constrained within {total_rooms} maximum simultaneous rooms.")
+                st.success(f"Routine Generated! Successfully constrained within {total_rooms} rooms and applied Sun/Mon blocks.")
             else:
-                st.error("❌ Impossible Constraints. The global room limit may be too tight for the active day caps you set. Increase available rooms or allow batches to operate on more days.")
+                st.error("❌ Impossible Constraints. Ensure faculties assigned to the Sun/Mon forced block have at least 6 total classes. Adjust limits and try again.")
 
     # --- 5. TABBED VIEWS & EXCEL EXPORT ---
     if st.session_state.preview_data is not None:
@@ -277,7 +350,6 @@ if course_file:
         with tab1:
             st.info("Days and Time Slots on the left, Batch Names across the top.")
             
-            # Master Grid HTML (Transposed)
             grid = {d: {s: {b: "" for b in batches} for s in slots_ordered} for d in days_ordered}
             for row in st.session_state.preview_data:
                 b, d, s = row["Batch"], row["Day"], row["Time Slot"]
@@ -306,7 +378,6 @@ if course_file:
             
             st.divider()
             
-            # --- EXCEL EXPORT ---
             wb = Workbook()
             ws = wb.active
             ws.title = "Master Routine"
@@ -381,7 +452,6 @@ if course_file:
             selected_facs = st.multiselect("Select Faculty to compare:", active_facs)
             
             if selected_facs:
-                # Unified Faculty Grid Logic
                 fac_grid = {d: {s: {f: "" for f in selected_facs} for s in slots_ordered} for d in days_ordered}
                 for row in st.session_state.preview_data:
                     fac = row["Faculty"]
