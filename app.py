@@ -44,14 +44,12 @@ if course_file:
         # Look for valid course rows (must contain a course code pattern like 'BBA' or numbers with dashes)
         row_cells = [str(val).strip() for val in row.values if pd.notna(val)]
         if len(row_cells) >= 4:
-            # Check if any cell looks like a course code (e.g., contains numbers and letters)
             potential_code = next((c for c in row_cells if any(char.isdigit() for char in c) and '-' in c), None)
             if potential_code:
-                # Find course title, teacher, and section based on typical column patterns
                 code_idx = row_cells.index(potential_code)
                 title = row_cells[code_idx + 1] if code_idx + 1 < len(row_cells) else "Course Title"
                 
-                # Search for teacher name (usually later in the row, avoiding semester text)
+                # Search for teacher name (avoiding semester text)
                 teacher = "TBA"
                 for cell in row_cells[code_idx+2:]:
                     cell_lower = cell.lower()
@@ -121,7 +119,7 @@ if course_file:
     
     st.divider()
 
-    # --- 2. GLOBAL SETTINGS ---
+    # --- 3. GLOBAL SETTINGS ---
     st.subheader("3. Global Engine Settings")
     g_col1, g_col2 = st.columns(2)
     with g_col1:
@@ -228,15 +226,13 @@ if course_file:
         
         view_mode = st.radio("Select View Mode:", ["Grid View (Matrix)", "List View (Master Table)"], horizontal=True)
         
-            if view_mode == "Grid View (Matrix)":
-            # Create a pivot table matrix: Rows = Time Slots, Columns = Days, Values = Course & Faculty strings
+        if view_mode == "Grid View (Matrix)":
             df_p = st.session_state.preview_df.copy()
             df_p['CellContent'] = df_p['Course Code'] + "\n(" + df_p['Course Title'] + ")\n👨‍🏫 " + df_p['Faculty']
             
             selected_batch_filter = st.selectbox("Select Batch to Inspect on Grid:", df_p['Batch & Section'].unique())
             df_filtered = df_p[df_p['Batch & Section'] == selected_batch_filter]
             
-            # Pivot table mapping time slots to days
             pivot_grid = df_filtered.pivot_table(
                 index="Time Slot", 
                 columns="Day", 
@@ -244,7 +240,6 @@ if course_file:
                 aggfunc=lambda x: ' | '.join(x)
             )
             
-            # Reorder columns to standard sequence
             standard_days = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
             existing_days = [d for d in standard_days if d in pivot_grid.columns]
             pivot_grid = pivot_grid[existing_days]
