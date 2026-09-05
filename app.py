@@ -1,15 +1,24 @@
 import streamlit as st
 import pandas as pd
 import json
+import re
+import copy
 from io import BytesIO
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from ortools.sat.python import cp_model
-import math
 
 st.set_page_config(page_title="BBA Routine Optimizer - Complete Matrix", layout="wide")
-st.title("BBA Routine Management System | Complete Matrix Engine")
-st.divider()
+
+# --- COPYRIGHT HEADER ---
+st.markdown("""
+<div style='text-align: center; padding: 15px; background-color: #1F4E78; color: white; border-radius: 8px; margin-bottom: 20px;'>
+    <h1 style='margin: 0; font-size: 28px;'>BBA Routine Management System</h1>
+    <p style='margin: 5px 0 0 0; font-size: 14px; color: #E9ECEF;'>
+        © Copyrighted to <b>Rezwan Aubhi</b> | <a href='mailto:r.aubhi@gmail.com' style='color: #FFD700; text-decoration: none;'>r.aubhi@gmail.com</a>
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
 # --- INITIALIZE PERSISTENT SESSION STATES ---
 if 'fac_rules' not in st.session_state:
@@ -18,29 +27,28 @@ if 'batch_rules' not in st.session_state:
     st.session_state.batch_rules = {}
 if 'sun_mon_facs' not in st.session_state:
     st.session_state.sun_mon_facs = []
+if 'fixed_rooms' not in st.session_state:
+    st.session_state.fixed_rooms = {}
 if 'preview_data' not in st.session_state:
     st.session_state.preview_data = None
+if 'routine_history' not in st.session_state:
+    st.session_state.routine_history = []
 if 'current_file_id' not in st.session_state:
     st.session_state.current_file_id = None
 if 'base_fac_df' not in st.session_state:
     st.session_state.base_fac_df = None
 
-# --- CONFIGURATION MANAGER (SAVE/LOAD) ---
+# --- CONFIGURATION MANAGER ---
 st.subheader("💾 Configuration Manager (Save/Load Rules)")
-st.info("Save your constraints locally so you never have to re-enter them if the app restarts.")
 col_conf1, col_conf2 = st.columns(2)
 with col_conf1:
     config_dict = {
         "fac_rules": st.session_state.fac_rules,
         "batch_rules": st.session_state.batch_rules,
-        "sun_mon_facs": st.session_state.sun_mon_facs
+        "sun_mon_facs": st.session_state.sun_mon_facs,
+        "fixed_rooms": st.session_state.fixed_rooms
     }
-    st.download_button(
-        label="📥 Download Saved Rules (.json)",
-        data=json.dumps(config_dict),
-        file_name="bba_routine_rules.json",
-        mime="application/json"
-    )
+    st.download_button("📥 Download Saved Rules (.json)", data=json.dumps(config_dict), file_name="bba_routine_rules.json", mime="application/json")
 with col_conf2:
     uploaded_config = st.file_uploader("📤 Upload Saved Rules (.json)", type=["json"])
     if uploaded_config:
@@ -48,12 +56,13 @@ with col_conf2:
         st.session_state.fac_rules = loaded_conf.get("fac_rules", [])
         st.session_state.batch_rules = loaded_conf.get("batch_rules", {})
         st.session_state.sun_mon_facs = loaded_conf.get("sun_mon_facs", [])
-        st.success("Rules successfully loaded! They will apply to the next generation.")
+        st.session_state.fixed_rooms = loaded_conf.get("fixed_rooms", {})
+        st.success("Rules loaded successfully!")
 
 st.divider()
 
-# --- 1. DATA UPLOAD & PARSING ---
-st.subheader("1. Data Upload & Template Parsing")
+# --- 1. DATA UPLOAD & AGGRESSIVE PARSING ---
+st.subheader("1. Data Upload & Master Parsing")
 course_file = st.file_uploader("Upload Fall 2026 Course Offering Sheet", type=["xlsx"])
 
 if course_file:
@@ -78,7 +87,7 @@ if course_file:
         if "batch" in row_str and len(row_vals) < 4:
             for v in row_vals:
                 if "batch" in v.lower():
-                    current_batch = v.lower().replace("batch", "").strip()
+                    current_batch = v.lower().replace("batch", "").strip().title()
             continue
             
         code_val = next((v for v in row_vals if any(c.isdigit() for c in v) and '-' in v and len(v) >= 5), None)
@@ -87,12 +96,11 @@ if course_file:
             code_idx = row_vals.index(code_val)
             title = row_vals[code_idx + 1] if code_idx + 1 < len(row_vals) else "Unknown Course"
             
-            # FIXED UNLIMITED SECTION PARSER
+            # Aggressive Section & Credit Parsing (Catches A, B, C, D, E, F, G, AD, BC)
+            last_val = row_vals[-1].upper()
             sections = ["A"]
-            last_val = row_vals[-1]
-            if not any(w in last_val.lower() for w in ['semester', 'year', 'cred', 'total', 'th', 'st', 'nd', 'rd', 'batch']):
-                sec_clean = last_val.replace(';', ',').replace('&', ',').replace('and', ',')
-                sections = [s.strip() for s in sec_clean.split(',') if s.strip()]
+            if not any(w in last_val for w in ['SEM', 'YEAR', 'CRED', 'TOTAL', 'TH', 'ST', 'ND', 'RD', 'BATCH']):
+                sections = [s.strip() for s in re.split(r'[,\s;&]+', last_val) if s.strip()]
                 search_space = row_vals[code_idx+2:-1] 
             else:
                 search_space = row_vals[code_idx+2:]
@@ -108,10 +116,13 @@ if course_file:
                     
             for sec in sections:
                 parsed_rows.append({
+                    "Batch_Core": current_batch,
                     "Batch": f"{current_batch} (Sec {sec})",
+                    "Section": sec,
                     "Code": code_val,
                     "Title": title,
-                    "Faculty": teacher
+                    "Faculty": teacher,
+                    "Credits": 3 # 1 section = 3 credits mathematically
                 })
 
     df_tasks = pd.DataFrame(parsed_rows)
@@ -161,10 +172,9 @@ if course_file:
 
     # --- 2. ADVANCED RULES (TABBED ENVIRONMENT) ---
     st.subheader("3. Advanced Scheduling Constraints")
-    tab_locks, tab_batches, tab_sunmon = st.tabs(["Specific Slot Locks", "Batch Limits & Blackouts", "Sun/Mon Forced Load"])
+    tab_locks, tab_batches, tab_sunmon, tab_rooms = st.tabs(["Faculty Locks", "Batch Limits & Blackouts", "Sun/Mon Forced Load", "Room Mappings"])
     
     with tab_locks:
-        st.write("**Specific Faculty Slot Locks**")
         col_t1, col_t2 = st.columns([1, 2])
         with col_t1:
             selected_fac = st.selectbox("Select Faculty:", available_faculties, key="l_fac")
@@ -181,7 +191,6 @@ if course_file:
                     st.rerun()
             
     with tab_batches:
-        st.write("**Batch Day Limits & Blackouts**")
         col_b1, col_b2 = st.columns([1, 2])
         with col_b1:
             target_batches = st.multiselect("Select Batch(es):", df_tasks['Batch'].unique().tolist())
@@ -199,7 +208,6 @@ if course_file:
                     st.rerun()
 
     with tab_sunmon:
-        st.write("**Force 3 Classes on Sunday & Monday**")
         col_sm1, col_sm2 = st.columns([1, 2])
         with col_sm1:
             sm_fac = st.selectbox("Select Faculty:", available_faculties, key="sm_fac_sel")
@@ -209,10 +217,25 @@ if course_file:
                     st.rerun()
         with col_sm2:
             if st.session_state.sun_mon_facs:
-                st.write("**Currently Forced Faculties:**")
-                st.write(st.session_state.sun_mon_facs)
+                st.write("**Currently Forced Faculties:**", st.session_state.sun_mon_facs)
                 if st.button("Clear Sun/Mon Locks"):
                     st.session_state.sun_mon_facs = []
+                    st.rerun()
+
+    with tab_rooms:
+        st.write("**Fix Room Numbers Batch-Wise (Optional)**")
+        col_r1, col_r2 = st.columns([1, 2])
+        with col_r1:
+            r_batch = st.selectbox("Select Batch to Lock:", df_tasks['Batch_Core'].unique().tolist())
+            r_num = st.text_input("Assign Room (e.g., Room 101):")
+            if st.button("💾 Lock Room to Batch"):
+                st.session_state.fixed_rooms[r_batch] = r_num
+                st.rerun()
+        with col_r2:
+            if st.session_state.fixed_rooms:
+                st.json(st.session_state.fixed_rooms)
+                if st.button("Clear Room Locks"):
+                    st.session_state.fixed_rooms = {}
                     st.rerun()
 
     st.divider()
@@ -226,7 +249,7 @@ if course_file:
         replace_tba = st.toggle("Convert TBA slots to an assigned Faculty member?", value=False)
         tba_replacement = st.selectbox("TBA Replacement Faculty:", available_faculties) if replace_tba else None
     with col_g2:
-        total_rooms = st.number_input("Total Available Rooms per Time Slot:", min_value=1, max_value=30, value=6, step=1)
+        total_rooms = st.number_input("Total Available Rooms per Time Slot:", min_value=1, max_value=50, value=15, step=1)
 
     st.divider()
     
@@ -235,45 +258,38 @@ if course_file:
         
         master_tasks = []
         for _, row in df_tasks.iterrows():
-            if not include_majors and "major" in row['Title'].lower():
-                continue
+            if not include_majors and "major" in row['Title'].lower(): continue
             teacher = row['Faculty']
             if teacher.lower() == 'tba' and replace_tba and tba_replacement:
                 teacher = tba_replacement
             master_tasks.append({
+                "Batch_Core": row['Batch_Core'],
                 "Batch": row['Batch'],
                 "Code": row['Code'],
                 "Title": row['Title'],
-                "Faculty": teacher
+                "Faculty": teacher,
+                "Section": row['Section']
             })
             
-        # --- VISUAL PRE-GENERATION DIAGNOSTICS ---
         fac_counts = {}
-        for t in master_tasks:
-            fac_counts[t["Faculty"]] = fac_counts.get(t["Faculty"], 0) + 1
+        for t in master_tasks: fac_counts[t["Faculty"]] = fac_counts.get(t["Faculty"], 0) + 1
             
         diagnostic_errors = []
-        
-        # 1. Check Sun/Mon rule viability
         for sm_fac in st.session_state.sun_mon_facs:
-            assigned = fac_counts.get(sm_fac, 0)
-            if assigned < 6:
-                diagnostic_errors.append(f"👨‍🏫 **{sm_fac}** is locked to take 6 classes on Sun/Mon, but the Excel sheet only assigns them **{assigned}** section(s).")
+            if fac_counts.get(sm_fac, 0) < 6:
+                diagnostic_errors.append(f"👨‍🏫 **{sm_fac}** is locked to 6 classes on Sun/Mon, but only has **{fac_counts.get(sm_fac, 0)}** total sections.")
                 
-        # 2. Check total room capacity
         total_slots = len(days_ordered) * len(slots_ordered)
         max_possible_classes = total_slots * total_rooms
         if len(master_tasks) > max_possible_classes:
-            diagnostic_errors.append(f"🏢 **Not Enough Rooms:** You have **{len(master_tasks)}** total sections to schedule, but {total_rooms} rooms only allows a maximum of **{max_possible_classes}** classes per week.")
+            diagnostic_errors.append(f"🏢 **Not Enough Rooms:** {len(master_tasks)} sections require more than the {total_rooms} simultaneous rooms configured.")
             
         if diagnostic_errors:
-            st.error("❌ **Pre-Generation Diagnostic Failed:** Please fix these mathematical contradictions before running the solver.")
-            for e in diagnostic_errors:
-                st.warning(e)
+            st.error("❌ **Pre-Generation Diagnostic Failed:**")
+            for e in diagnostic_errors: st.warning(e)
             st.stop()
             
-        # --- MATH SOLVER ---
-        with st.spinner("Diagnostics Passed. Compiling Math Engine and Optimizing..."):
+        with st.spinner("Compiling Math Engine and Optimizing..."):
             model = cp_model.CpModel()
             x = {}
             for i in range(len(master_tasks)):
@@ -296,8 +312,7 @@ if course_file:
                         
                     fac_map = {}
                     for i, t in enumerate(master_tasks):
-                        if t["Faculty"] != "TBA":
-                            fac_map.setdefault(t["Faculty"], []).append(i)
+                        if t["Faculty"] != "TBA": fac_map.setdefault(t["Faculty"], []).append(i)
                     for indices in fac_map.values():
                         model.AddAtMostOne(x[(i, d, s)] for i in indices)
 
@@ -308,14 +323,11 @@ if course_file:
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == fac_name]
                 if not f_indices: continue
                 for d in days_ordered:
-                    max_cap = int(f_row[f"{d} Max"])
-                    model.Add(sum(x[(i, d, s)] for i in f_indices for s in slots_ordered) <= max_cap)
+                    model.Add(sum(x[(i, d, s)] for i in f_indices for s in slots_ordered) <= int(f_row[f"{d} Max"]))
 
             for rule in st.session_state.fac_rules:
-                r_fac, r_day, r_slot = rule["Faculty"], rule["Day"], rule["Slot"]
-                f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == r_fac]
-                if f_indices:
-                    model.Add(sum(x[(i, r_day, r_slot)] for i in f_indices) == 1)
+                f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == rule["Faculty"]]
+                if f_indices: model.Add(sum(x[(i, rule["Day"], rule["Slot"])] for i in f_indices) == 1)
 
             for sm_fac in st.session_state.sun_mon_facs:
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == sm_fac]
@@ -328,8 +340,7 @@ if course_file:
                 if not b_indices: continue
                 for d in rules["Blocked Days"]:
                     for i in b_indices:
-                        for s in slots_ordered:
-                            model.Add(x[(i, d, s)] == 0)
+                        for s in slots_ordered: model.Add(x[(i, d, s)] == 0)
                 b_active_vars = []
                 for d in days_ordered:
                     day_active = model.NewBoolVar(f"b_active_{b_key}_{d}")
@@ -357,47 +368,49 @@ if course_file:
                     for d in days_ordered:
                         for s in slots_ordered:
                             if solver.Value(x[(i, d, s)]) == 1:
+                                # Room Assignment Logic
+                                assigned_room = st.session_state.fixed_rooms.get(t['Batch_Core'], f"Room {i % total_rooms + 1}")
                                 scheduled_output.append({
+                                    "ID": f"Task_{i}",
                                     "Batch": t['Batch'],
+                                    "Batch_Core": t['Batch_Core'],
+                                    "Section": t['Section'],
                                     "Day": d,
                                     "Time Slot": s,
                                     "Course Code": t['Code'],
                                     "Course Title": t['Title'],
-                                    "Faculty": t['Faculty']
+                                    "Faculty": t['Faculty'],
+                                    "Room": assigned_room
                                 })
                 st.session_state.preview_data = scheduled_output
-                st.success(f"Routine Generated! Scheduled {len(master_tasks)} courses across {total_rooms} rooms.")
+                st.session_state.routine_history = [copy.deepcopy(scheduled_output)]
+                st.success("Routine Generated! Check the tabs below for visualization and editing.")
             else:
                 st.error("❌ Impossible Constraints. Ensure batch blackouts aren't forcing too many classes into a single day.")
 
-    # --- 5. TABBED VIEWS & EXCEL EXPORT ---
+    # --- 5. INTERACTIVE DASHBOARDS ---
     if st.session_state.preview_data is not None:
         days_ordered = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
         slots_ordered = ["9:30-11:00", "11:00-12:30", "1:30-3:00", "3:00-4:30"]
-        batches = sorted(list(set(row["Batch"] for row in st.session_state.preview_data)))
         
-        tab1, tab2 = st.tabs(["📊 Master Grid View", "👨‍🏫 Faculty Individual Routines"])
+        tab_grid, tab_facs, tab_swap = st.tabs(["📊 Master Grid View", "👨‍🏫 Faculty Profiles", "🔄 Manual Swap & Undo Engine"])
         
-        with tab1:
-            st.info("Days and Time Slots on the left, Batch Names across the top.")
-            
+        with tab_grid:
+            batches = sorted(list(set(row["Batch"] for row in st.session_state.preview_data)))
             grid = {d: {s: {b: "" for b in batches} for s in slots_ordered} for d in days_ordered}
             for row in st.session_state.preview_data:
                 b, d, s = row["Batch"], row["Day"], row["Time Slot"]
-                grid[d][s][b] = f"<b>{row['Course Code']}</b><br>{row['Course Title']}<br>{row['Faculty']}"
+                grid[d][s][b] = f"<b>{row['Course Code']}</b><br>{row['Course Title']}<br>{row['Faculty']}<br><i>{row['Room']}</i>"
 
             html = "<div style='overflow-x:auto;'><table style='width:100%; border-collapse: collapse; text-align: center; font-size: 13px; font-family: sans-serif;'>"
             html += "<tr><th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>Day</th>"
             html += "<th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>Time Slot</th>"
-            for b in batches:
-                html += f"<th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>{b}</th>"
+            for b in batches: html += f"<th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>{b}</th>"
             html += "</tr>"
-            
             for d in days_ordered:
                 for i, s in enumerate(slots_ordered):
                     html += "<tr>"
-                    if i == 0:
-                        html += f"<td rowspan='4' style='border: 1px solid #ccc; font-weight: bold; background-color: #f8f9fa; vertical-align: middle;'>{d}</td>"
+                    if i == 0: html += f"<td rowspan='4' style='border: 1px solid #ccc; font-weight: bold; background-color: #f8f9fa; vertical-align: middle;'>{d}</td>"
                     html += f"<td style='border: 1px solid #ccc; background-color: #e9ecef; padding: 8px; white-space: nowrap;'>{s}</td>"
                     for b in batches:
                         val = grid[d][s][b]
@@ -407,12 +420,10 @@ if course_file:
             html += "</table></div>"
             st.markdown(html, unsafe_allow_html=True)
             
-            st.divider()
-            
+            # EXCEL EXPORT
             wb = Workbook()
             ws = wb.active
             ws.title = "Master Routine"
-            
             thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
             header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
             header_font = Font(name='Arial', size=11, bold=True, color="FFFFFF")
@@ -450,57 +461,56 @@ if course_file:
                     sc = ws.cell(row=row_idx, column=2, value=s)
                     sc.alignment = Alignment(horizontal='center', vertical='center')
                     sc.border = thin_border
-                    
                     for c_idx, b in enumerate(batches, 3):
-                        val = grid[d][s][b].replace("<b>", "").replace("</b>", "").replace("<br>", "\n")
+                        val = grid[d][s][b].replace("<b>", "").replace("</b>", "").replace("<br>", "\n").replace("<i>", "").replace("</i>", "")
                         cell = ws.cell(row=row_idx, column=c_idx, value=val)
                         cell.alignment = Alignment(wrapText=True, horizontal='center', vertical='center')
                         cell.border = thin_border
                     row_idx += 1
-                    
                 ws.merge_cells(start_row=start_row, start_column=1, end_row=row_idx-1, end_column=1)
                 dc = ws.cell(row=start_row, column=1, value=d)
                 dc.alignment = Alignment(horizontal='center', vertical='center')
                 dc.font = Font(bold=True)
-                for r in range(start_row, row_idx):
-                    ws.cell(row=r, column=1).border = thin_border
+                for r in range(start_row, row_idx): ws.cell(row=r, column=1).border = thin_border
                 
             output = BytesIO()
             wb.save(output)
             output.seek(0)
-            
-            st.download_button(
-                label="📥 Download Official Master Routine (.xlsx)",
-                data=output,
-                file_name="BBA_Fall_2026_Master_Routine.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
+            st.download_button("📥 Download Official Master Routine (.xlsx)", data=output, file_name="BBA_Fall_2026_Master_Routine.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
-        with tab2:
-            st.info("Select one or more faculty members to view their specific schedules side-by-side in a single grid.")
+        with tab_facs:
+            st.write("### Faculty Workload & Isolated Routines")
             active_facs = sorted(list(set(row["Faculty"] for row in st.session_state.preview_data)))
-            selected_facs = st.multiselect("Select Faculty to compare:", active_facs)
             
+            # Faculty Profile Generator
+            prof_data = []
+            for f in active_facs:
+                f_courses = [r for r in st.session_state.preview_data if r["Faculty"] == f]
+                b_list = list(set([r["Batch_Core"] for r in f_courses]))
+                s_list = list(set([r["Section"] for r in f_courses]))
+                credits = len(f_courses) * 3
+                desig = edited_faculty[edited_faculty['Faculty Name'] == f]['Type'].values[0] if f in edited_faculty['Faculty Name'].values else "Unknown"
+                prof_data.append({"Faculty Name": f, "Designation": desig, "Allocated Batches": ", ".join(b_list), "Sections": ", ".join(s_list), "Total Credits": credits})
+            
+            st.dataframe(pd.DataFrame(prof_data), use_container_width=True)
+            
+            selected_facs = st.multiselect("Select Faculty to compare visual routines:", active_facs)
             if selected_facs:
                 fac_grid = {d: {s: {f: "" for f in selected_facs} for s in slots_ordered} for d in days_ordered}
                 for row in st.session_state.preview_data:
                     fac = row["Faculty"]
                     if fac in selected_facs:
-                        fac_grid[row["Day"]][row["Time Slot"]][fac] = f"<b>{row['Course Code']}</b><br>{row['Batch']}"
+                        fac_grid[row["Day"]][row["Time Slot"]][fac] = f"<b>{row['Course Code']}</b><br>{row['Batch']}<br><i>{row['Room']}</i>"
 
                 fac_html = "<div style='overflow-x:auto;'><table style='width:100%; border-collapse: collapse; text-align: center; font-size: 13px; font-family: sans-serif;'>"
                 fac_html += "<tr><th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>Day</th>"
                 fac_html += "<th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>Time Slot</th>"
-                for f in selected_facs:
-                    fac_html += f"<th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>{f}</th>"
+                for f in selected_facs: fac_html += f"<th style='border: 1px solid #ccc; background-color: #1F4E78; color: white; padding: 10px;'>{f}</th>"
                 fac_html += "</tr>"
-                
                 for d in days_ordered:
                     for i, s in enumerate(slots_ordered):
                         fac_html += "<tr>"
-                        if i == 0:
-                            fac_html += f"<td rowspan='4' style='border: 1px solid #ccc; font-weight: bold; background-color: #f8f9fa; vertical-align: middle;'>{d}</td>"
+                        if i == 0: fac_html += f"<td rowspan='4' style='border: 1px solid #ccc; font-weight: bold; background-color: #f8f9fa; vertical-align: middle;'>{d}</td>"
                         fac_html += f"<td style='border: 1px solid #ccc; background-color: #e9ecef; padding: 8px; white-space: nowrap;'>{s}</td>"
                         for f in selected_facs:
                             val = fac_grid[d][s][f]
@@ -509,3 +519,47 @@ if course_file:
                         fac_html += "</tr>"
                 fac_html += "</table></div>"
                 st.markdown(fac_html, unsafe_allow_html=True)
+
+        with tab_swap:
+            st.write("### Interactive Manual Swap Engine")
+            st.info("Swap time slots between two specific scheduled classes. The system will check for clashes before committing.")
+            
+            task_list = {f"{r['Day']} {r['Time Slot']} | {r['Batch']} | {r['Course Code']} ({r['Faculty']})": r for r in st.session_state.preview_data}
+            
+            col_sw1, col_sw2 = st.columns(2)
+            with col_sw1:
+                swap_1 = st.selectbox("Select First Class to Swap:", options=list(task_list.keys()))
+            with col_sw2:
+                swap_2 = st.selectbox("Select Second Class to Swap:", options=list(task_list.keys()))
+                
+            if st.button("🔄 Execute Swap"):
+                t1, t2 = task_list[swap_1], task_list[swap_2]
+                clash_found = False
+                
+                # Simple Clash Check
+                for r in st.session_state.preview_data:
+                    if r["ID"] not in [t1["ID"], t2["ID"]]:
+                        if r["Day"] == t2["Day"] and r["Time Slot"] == t2["Time Slot"]:
+                            if r["Faculty"] == t1["Faculty"] and t1["Faculty"] != "TBA": clash_found = True; st.error(f"Clash: {t1['Faculty']} is already teaching at {t2['Day']} {t2['Time Slot']}")
+                            if r["Batch"] == t1["Batch"]: clash_found = True; st.error(f"Clash: {t1['Batch']} already has a class at {t2['Day']} {t2['Time Slot']}")
+                        if r["Day"] == t1["Day"] and r["Time Slot"] == t1["Time Slot"]:
+                            if r["Faculty"] == t2["Faculty"] and t2["Faculty"] != "TBA": clash_found = True; st.error(f"Clash: {t2['Faculty']} is already teaching at {t1['Day']} {t1['Time Slot']}")
+                            if r["Batch"] == t2["Batch"]: clash_found = True; st.error(f"Clash: {t2['Batch']} already has a class at {t1['Day']} {t1['Time Slot']}")
+                            
+                if not clash_found:
+                    new_data = copy.deepcopy(st.session_state.preview_data)
+                    for r in new_data:
+                        if r["ID"] == t1["ID"]:
+                            r["Day"], r["Time Slot"] = t2["Day"], t2["Time Slot"]
+                        elif r["ID"] == t2["ID"]:
+                            r["Day"], r["Time Slot"] = t1["Day"], t1["Time Slot"]
+                    st.session_state.routine_history.append(new_data)
+                    st.session_state.preview_data = new_data
+                    st.success("Swap Successful! The Grid and Faculty views have been updated.")
+                    st.rerun()
+                    
+            if len(st.session_state.routine_history) > 1:
+                if st.button("↩️ Undo Last Swap", type="secondary"):
+                    st.session_state.routine_history.pop()
+                    st.session_state.preview_data = st.session_state.routine_history[-1]
+                    st.rerun()
