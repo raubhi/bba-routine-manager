@@ -204,7 +204,7 @@ if course_file:
 
     # --- 2. ADVANCED RULES (TABBED ENVIRONMENT) ---
     st.subheader("3. Advanced Scheduling Constraints")
-    tab_locks, tab_batches, tab_sunmon, tab_rooms = st.tabs(["Faculty Locks", "Batch Limits & Blackouts", "Sun/Mon Forced Load", "Room Mappings"])
+    tab_locks, tab_batches, tab_sunmon, tab_rooms = st.tabs(["Faculty Locks", "Batch Limits & Blackouts", "Force Sun/Mon Classes", "Room Mappings"])
     
     with tab_locks:
         col_t1, col_t2 = st.columns([1, 2])
@@ -241,7 +241,7 @@ if course_file:
 
     with tab_sunmon:
         st.write("**Force Classes to Sunday & Monday**")
-        st.info("⚠️ Faculties selected here will be forced to teach up to 3 classes on Sunday and up to 3 on Monday. If they have more than 6 classes, the remaining will spill over into other days based on your Limits Matrix. This will NOT block other days artificially.")
+        st.info("⚠️ Faculty selected here will have exactly 3 classes scheduled on Sunday and up to 3 on Monday. They can still teach on other days if they have more classes.")
         col_sm1, col_sm2 = st.columns([1, 2])
         with col_sm1:
             sm_fac = st.selectbox("Select Faculty:", available_faculties, key="sm_fac_sel")
@@ -278,8 +278,8 @@ if course_file:
     st.subheader("4. Global Engine Settings")
     col_g1, col_g2 = st.columns(2)
     with col_g1:
-        include_majors = st.toggle("Include Major Courses (Uncheck to drop)", value=False)
-        compact_schedule = st.toggle("Enforce Compact Scheduling (Prevent extreme gaps)", value=True)
+        include_majors = st.toggle("Include Major Courses", value=False)
+        compact_schedule = st.toggle("Enforce Compact Scheduling (⚠️ Warning: Highly restrictive, turn off if generation fails)", value=True)
         replace_tba = st.toggle("Convert TBA slots to an assigned Faculty member?", value=False)
         tba_replacement = st.selectbox("TBA Replacement Faculty:", available_faculties) if replace_tba else None
     with col_g2:
@@ -305,18 +305,53 @@ if course_file:
                 "Section": row['Section']
             })
             
+        # =========================================================
+        # 🚨 THE MATHEMATICAL DIAGNOSTIC ENGINE
+        # =========================================================
         diagnostic_errors = []
+        
+        # 1. Faculty Workload vs. Matrix Limits Check
+        fac_counts = {}
+        for t in master_tasks: fac_counts[t["Faculty"]] = fac_counts.get(t["Faculty"], 0) + 1
+        
+        for f, count in fac_counts.items():
+            if f == "TBA": continue
+            f_row = edited_faculty[edited_faculty['Faculty Name'] == f]
+            if not f_row.empty:
+                max_weekly_capacity = sum(int(f_row[f"{d} Max"].values[0]) for d in days_ordered)
+                if count > max_weekly_capacity:
+                    diagnostic_errors.append(f"👨‍🏫 **Faculty Overload:** **{f}** has **{count}** sections assigned in the Excel sheet, but their maximum allowed classes for the week is only **{max_weekly_capacity}** based on your Matrix limits. Increase their limits on specific days.")
+                
+                # 2. Check if Sun/Mon rules contradict the matrix limits
+                if f in st.session_state.sun_mon_facs:
+                    sun_limit = int(f_row["Sunday Max"].values[0])
+                    mon_limit = int(f_row["Monday Max"].values[0])
+                    sun_target = min(3, count)
+                    mon_target = min(3, max(0, count - sun_target))
+                    if sun_limit < sun_target:
+                        diagnostic_errors.append(f"⚠️ **Matrix Contradiction:** **{f}** is locked to {sun_target} classes on Sunday, but their grid limit for Sunday is set to {sun_limit}.")
+                    if mon_limit < mon_target:
+                        diagnostic_errors.append(f"⚠️ **Matrix Contradiction:** **{f}** is locked to {mon_target} classes on Monday, but their grid limit for Monday is set to {mon_limit}.")
+
+        # 3. Batch Capacity Squeeze Check
+        for b_key, rules in st.session_state.batch_rules.items():
+            b_count = sum(1 for t in master_tasks if t["Batch"] == b_key)
+            max_possible_slots = rules["Max Days"] * len(slots_ordered)
+            if b_count > max_possible_slots:
+                diagnostic_errors.append(f"🎓 **Batch Squeeze:** **{b_key}** requires **{b_count}** classes, but is limited to only {rules['Max Days']} days ({max_possible_slots} total slots). The solver cannot fit them. Increase Max Days.")
+
+        # 4. Total Room Cap Check
         total_slots = len(days_ordered) * len(slots_ordered)
         max_possible_classes = total_slots * total_rooms
         if len(master_tasks) > max_possible_classes:
-            diagnostic_errors.append(f"🏢 **Not Enough Rooms:** {len(master_tasks)} sections require more than the {total_rooms} simultaneous rooms configured.")
+            diagnostic_errors.append(f"🏢 **Not Enough Rooms Globally:** {len(master_tasks)} total sections require more than the {total_rooms} simultaneous rooms configured.")
             
         if diagnostic_errors:
-            st.error("❌ **Pre-Generation Diagnostic Failed:**")
+            st.error("❌ **Pre-Generation Diagnostic Failed: Mathematical Contradiction Found.** Please fix the issues below before running the solver.")
             for e in diagnostic_errors: st.warning(e)
             st.stop()
             
-        with st.spinner("Compiling Math Engine and Optimizing..."):
+        with st.spinner("Diagnostics Passed! Compiling Math Engine and Optimizing..."):
             model = cp_model.CpModel()
             x = {}
             for i in range(len(master_tasks)):
@@ -356,7 +391,7 @@ if course_file:
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == rule["Faculty"]]
                 if f_indices: model.Add(sum(x[(i, rule["Day"], rule["Slot"])] for i in f_indices) == 1)
 
-            # UPDATED SUN/MON LOGIC: Fill Sun/Mon up to 3 each, leave other days open naturally
+            # --- DYNAMIC SUN/MON LOAD ---
             for sm_fac in st.session_state.sun_mon_facs:
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == sm_fac]
                 if f_indices:
@@ -380,6 +415,7 @@ if course_file:
                     b_active_vars.append(day_active)
                 model.Add(sum(b_active_vars) <= rules["Max Days"])
 
+            # --- COMPACT SCHEDULE SQUEEZE ---
             if compact_schedule:
                 for f in active_facs:
                     f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == f]
@@ -417,7 +453,8 @@ if course_file:
                 st.session_state.routine_history = [copy.deepcopy(scheduled_output)]
                 st.success("Routine Generated! Check the tabs below for visualization and editing.")
             else:
-                st.error("❌ Impossible Constraints. Ensure batch blackouts aren't forcing too many classes into a single day.")
+                st.error("❌ **Hidden Mathematical Contradiction Found.** The solver passed basic capacity checks but failed to generate a clash-free routine.")
+                st.warning("👉 **HOW TO FIX THIS:** \n1. **Turn off 'Enforce Compact Scheduling'** (This rule is very strict and often breaks tight schedules). \n2. Check if multiple teachers are locked into the exact same slot/room. \n3. Increase Total Available Rooms.")
 
     # --- 5. INTERACTIVE DASHBOARDS ---
     if st.session_state.preview_data is not None:
@@ -451,7 +488,6 @@ if course_file:
             html += "</table></div>"
             st.markdown(html, unsafe_allow_html=True)
             
-            # EXCEL EXPORT
             wb = Workbook()
             ws = wb.active
             ws.title = "Master Routine"
