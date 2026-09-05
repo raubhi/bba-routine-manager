@@ -28,6 +28,7 @@ if 'fixed_rooms' not in st.session_state: st.session_state.fixed_rooms = {}
 if 'preview_data' not in st.session_state: st.session_state.preview_data = None
 if 'routine_history' not in st.session_state: st.session_state.routine_history = []
 if 'current_file_id' not in st.session_state: st.session_state.current_file_id = None
+if 'loaded_config_id' not in st.session_state: st.session_state.loaded_config_id = None
 if 'base_fac_df' not in st.session_state: st.session_state.base_fac_df = None
 if 'latest_fac_df_dict' not in st.session_state: st.session_state.latest_fac_df_dict = None
 if 'pending_fix_data' not in st.session_state: st.session_state.pending_fix_data = None
@@ -48,15 +49,21 @@ with col_conf1:
 with col_conf2:
     uploaded_config = st.file_uploader("📤 Upload Saved Rules (.json)", type=["json"])
     if uploaded_config:
-        loaded_conf = json.load(uploaded_config)
-        st.session_state.fac_rules = loaded_conf.get("fac_rules", [])
-        st.session_state.batch_rules = loaded_conf.get("batch_rules", {})
-        st.session_state.sun_mon_facs = loaded_conf.get("sun_mon_facs", [])
-        st.session_state.fixed_rooms = loaded_conf.get("fixed_rooms", {})
-        if loaded_conf.get("fac_matrix"):
-            st.session_state.base_fac_df = pd.DataFrame(loaded_conf["fac_matrix"])
-            if "fac_editor_widget" in st.session_state: del st.session_state["fac_editor_widget"]
-        st.success("Rules loaded successfully!")
+        # THE FIX: Create a unique ID for the uploaded file so it is only parsed ONCE.
+        config_id = f"{uploaded_config.name}_{uploaded_config.size}"
+        if st.session_state.loaded_config_id != config_id:
+            loaded_conf = json.load(uploaded_config)
+            st.session_state.fac_rules = loaded_conf.get("fac_rules", [])
+            st.session_state.batch_rules = loaded_conf.get("batch_rules", {})
+            st.session_state.sun_mon_facs = loaded_conf.get("sun_mon_facs", [])
+            st.session_state.fixed_rooms = loaded_conf.get("fixed_rooms", {})
+            if loaded_conf.get("fac_matrix"):
+                st.session_state.base_fac_df = pd.DataFrame(loaded_conf["fac_matrix"])
+                if "fac_editor_widget" in st.session_state: del st.session_state["fac_editor_widget"]
+            st.session_state.loaded_config_id = config_id
+            st.success("Rules loaded successfully!")
+        else:
+            st.info("Rules loaded. (You can safely clear individual rules below without them returning).")
 
 st.divider()
 
@@ -89,8 +96,10 @@ if course_file:
             for v in row_vals:
                 if "batch" in v.lower():
                     m = re.search(r'(\d+(?:st|nd|rd|th)?)', v, flags=re.IGNORECASE)
-                    if m: current_batch = f"{m.group(1).title()} Batch"
-                    else: current_batch = v.split(',')[0].replace(":", "").replace("Sections", "").strip().title()
+                    if m:
+                        current_batch = f"{m.group(1).title()} Batch"
+                    else:
+                        current_batch = v.split(',')[0].replace(":", "").replace("Sections", "").strip().title()
             continue
             
         code_val = next((v for v in row_vals if any(c.isdigit() for c in v) and '-' in v and len(v) >= 5), None)
@@ -103,7 +112,8 @@ if course_file:
         else:
             if last_code and len(row_vals) >= 1 and not any(kw in row_str for kw in ['major', 'minor', 'total', 'credit', 'batch']):
                 data_cells = row_vals
-            else: continue
+            else:
+                continue
                 
         if not data_cells: data_cells = ["TBA", "A"]
         last_val = str(data_cells[-1]).upper()
@@ -222,6 +232,7 @@ if course_file:
 
     with tab_sunmon:
         st.write("**Force Classes to Sunday & Monday**")
+        st.info("⚠️ Faculty selected here will have exactly 3 classes scheduled on Sunday and up to 3 on Monday. If they have more than 6 classes, the remaining will spill over into other days based on your Limits Matrix. This will NOT block other days artificially.")
         col_sm1, col_sm2 = st.columns([1, 2])
         with col_sm1:
             sm_fac = st.selectbox("Select Faculty:", available_faculties, key="sm_fac_sel")
@@ -304,20 +315,17 @@ if course_file:
         # =========================================================
         diagnostic_errors = []
         
-        # 1. Total Room Limit Scan
         total_slots = len(days_ordered) * len(slots_ordered)
         max_possible_classes = total_slots * total_rooms
         if len(master_tasks) > max_possible_classes:
             diagnostic_errors.append(f"🏢 **GLOBAL FAILURE:** You have **{len(master_tasks)} total sections**, but {total_rooms} rooms × 24 slots only allows **{max_possible_classes} maximum classes**. Increase your room count.")
             
-        # 2. Batch Hard Limit Scan
         batch_counts = {}
         for t in master_tasks: batch_counts[t["Batch"]] = batch_counts.get(t["Batch"], 0) + 1
         for b, count in batch_counts.items():
             if count > 24:
                 diagnostic_errors.append(f"🎓 **BATCH FAILURE:** **{b}** has **{count} classes**. A batch can only take a maximum of 24 classes per week. Please fix the Excel offering sheet.")
                 
-        # 3. Faculty Hard Limit Scan
         fac_counts = {}
         for t in master_tasks: fac_counts[t["Faculty"]] = fac_counts.get(t["Faculty"], 0) + 1
         for f, count in fac_counts.items():
