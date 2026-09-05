@@ -204,7 +204,7 @@ if course_file:
 
     # --- 2. ADVANCED RULES (TABBED ENVIRONMENT) ---
     st.subheader("3. Advanced Scheduling Constraints")
-    tab_locks, tab_batches, tab_sunmon, tab_rooms = st.tabs(["Faculty Locks", "Batch Limits & Blackouts", "Strict Sun/Mon Routing", "Room Mappings"])
+    tab_locks, tab_batches, tab_sunmon, tab_rooms = st.tabs(["Faculty Locks", "Batch Limits & Blackouts", "Sun/Mon Forced Load", "Room Mappings"])
     
     with tab_locks:
         col_t1, col_t2 = st.columns([1, 2])
@@ -240,18 +240,18 @@ if course_file:
                     st.rerun()
 
     with tab_sunmon:
-        st.write("**Restrict Faculty strictly to Sun/Mon**")
-        st.info("⚠️ Faculties selected here will be blocked from Sat/Tue/Wed/Thu. All their assigned sections will be perfectly distributed across Sunday and Monday.")
+        st.write("**Force Classes to Sunday & Monday**")
+        st.info("⚠️ Faculties selected here will be forced to teach up to 3 classes on Sunday and up to 3 on Monday. If they have more than 6 classes, the remaining will spill over into other days based on your Limits Matrix. This will NOT block other days artificially.")
         col_sm1, col_sm2 = st.columns([1, 2])
         with col_sm1:
             sm_fac = st.selectbox("Select Faculty:", available_faculties, key="sm_fac_sel")
-            if st.button("➕ Confine to Sun/Mon"):
+            if st.button("➕ Force Sun/Mon Load"):
                 if sm_fac not in st.session_state.sun_mon_facs:
                     st.session_state.sun_mon_facs.append(sm_fac)
                     st.rerun()
         with col_sm2:
             if st.session_state.sun_mon_facs:
-                st.write("**Currently Confined Faculties:**", st.session_state.sun_mon_facs)
+                st.write("**Currently Forced Faculties:**", st.session_state.sun_mon_facs)
                 if st.button("Clear Sun/Mon Locks"):
                     st.session_state.sun_mon_facs = []
                     st.rerun()
@@ -305,15 +305,7 @@ if course_file:
                 "Section": row['Section']
             })
             
-        fac_counts = {}
-        for t in master_tasks: fac_counts[t["Faculty"]] = fac_counts.get(t["Faculty"], 0) + 1
-            
         diagnostic_errors = []
-        # UPDATED DIAGNOSTIC LOGIC: Maximum possible classes in 2 days (Sun/Mon) is 6.
-        for sm_fac in st.session_state.sun_mon_facs:
-            if fac_counts.get(sm_fac, 0) > 6:
-                diagnostic_errors.append(f"👨‍🏫 **{sm_fac}** is strictly restricted to Sun/Mon, but has **{fac_counts.get(sm_fac, 0)}** total sections. A faculty can only take a maximum of 6 classes across 2 days.")
-                
         total_slots = len(days_ordered) * len(slots_ordered)
         max_possible_classes = total_slots * total_rooms
         if len(master_tasks) > max_possible_classes:
@@ -364,14 +356,16 @@ if course_file:
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == rule["Faculty"]]
                 if f_indices: model.Add(sum(x[(i, rule["Day"], rule["Slot"])] for i in f_indices) == 1)
 
-            # UPDATED SUN/MON LOGIC: Block Sat, Tue, Wed, Thu completely
+            # UPDATED SUN/MON LOGIC: Fill Sun/Mon up to 3 each, leave other days open naturally
             for sm_fac in st.session_state.sun_mon_facs:
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == sm_fac]
                 if f_indices:
-                    for i in f_indices:
-                        for d in ["Saturday", "Tuesday", "Wednesday", "Thursday"]:
-                            for s in slots_ordered:
-                                model.Add(x[(i, d, s)] == 0)
+                    total_f_classes = len(f_indices)
+                    sun_target = min(3, total_f_classes)
+                    mon_target = min(3, max(0, total_f_classes - sun_target))
+                    
+                    model.Add(sum(x[(i, "Sunday", s)] for i in f_indices for s in slots_ordered) == sun_target)
+                    model.Add(sum(x[(i, "Monday", s)] for i in f_indices for s in slots_ordered) == mon_target)
 
             for b_key, rules in st.session_state.batch_rules.items():
                 b_indices = [i for i, t in enumerate(master_tasks) if t["Batch"] == b_key]
