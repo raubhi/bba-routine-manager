@@ -49,7 +49,6 @@ with col_conf1:
 with col_conf2:
     uploaded_config = st.file_uploader("📤 Upload Saved Rules (.json)", type=["json"])
     if uploaded_config:
-        # THE FIX: Create a unique ID for the uploaded file so it is only parsed ONCE.
         config_id = f"{uploaded_config.name}_{uploaded_config.size}"
         if st.session_state.loaded_config_id != config_id:
             loaded_conf = json.load(uploaded_config)
@@ -96,10 +95,8 @@ if course_file:
             for v in row_vals:
                 if "batch" in v.lower():
                     m = re.search(r'(\d+(?:st|nd|rd|th)?)', v, flags=re.IGNORECASE)
-                    if m:
-                        current_batch = f"{m.group(1).title()} Batch"
-                    else:
-                        current_batch = v.split(',')[0].replace(":", "").replace("Sections", "").strip().title()
+                    if m: current_batch = f"{m.group(1).title()} Batch"
+                    else: current_batch = v.split(',')[0].replace(":", "").replace("Sections", "").strip().title()
             continue
             
         code_val = next((v for v in row_vals if any(c.isdigit() for c in v) and '-' in v and len(v) >= 5), None)
@@ -110,10 +107,8 @@ if course_file:
             last_title = row_vals[code_idx + 1] if code_idx + 1 < len(row_vals) else "Unknown Course"
             data_cells = row_vals[code_idx+2:]
         else:
-            if last_code and len(row_vals) >= 1 and not any(kw in row_str for kw in ['major', 'minor', 'total', 'credit', 'batch']):
-                data_cells = row_vals
-            else:
-                continue
+            if last_code and len(row_vals) >= 1 and not any(kw in row_str for kw in ['major', 'minor', 'total', 'credit', 'batch']): data_cells = row_vals
+            else: continue
                 
         if not data_cells: data_cells = ["TBA", "A"]
         last_val = str(data_cells[-1]).upper()
@@ -138,15 +133,7 @@ if course_file:
                 break
                 
         for sec in sections:
-            parsed_rows.append({
-                "Batch_Core": current_batch,
-                "Batch": f"{current_batch} (Sec {sec})",
-                "Section": sec,
-                "Code": last_code,
-                "Title": last_title,
-                "Faculty": teacher,
-                "Credits": 3
-            })
+            parsed_rows.append({"Batch_Core": current_batch, "Batch": f"{current_batch} (Sec {sec})", "Section": sec, "Code": last_code, "Title": last_title, "Faculty": teacher, "Credits": 3})
 
     df_tasks = pd.DataFrame(parsed_rows)
 
@@ -162,20 +149,16 @@ if course_file:
                     is_adjunct = True
                     continue
                 name = str(row.iloc[1]).strip()
-                if name.lower() not in ['nan', 'name', '']:
-                    faculty_data.append({"Faculty Name": name, "Type": 'Adjunct' if is_adjunct else 'Full-Time'})
+                if name.lower() not in ['nan', 'name', '']: faculty_data.append({"Faculty Name": name, "Type": 'Adjunct' if is_adjunct else 'Full-Time'})
         
         if not faculty_data:
             extracted = df_tasks['Faculty'].dropna().unique()
             faculty_data = [{"Faculty Name": str(f).strip(), "Type": "Full-Time"} for f in extracted if str(f).strip() != '']
             
-        if not any(f['Faculty Name'] == 'TBA' for f in faculty_data):
-            faculty_data.append({"Faculty Name": "TBA", "Type": "Adjunct"})
+        if not any(f['Faculty Name'] == 'TBA' for f in faculty_data): faculty_data.append({"Faculty Name": "TBA", "Type": "Adjunct"})
             
         fac_df = pd.DataFrame(faculty_data)
-        for day in ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]:
-            fac_df[f"{day} Max"] = 3
-            
+        for day in ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]: fac_df[f"{day} Max"] = 3
         st.session_state.base_fac_df = fac_df
         if "fac_editor_widget" in st.session_state: del st.session_state["fac_editor_widget"]
 
@@ -185,8 +168,7 @@ if course_file:
     st.subheader("2. Persistent Faculty Roster & Daily Limits Matrix")
     st.info("A batch can have up to 4 classes per day. However, a faculty is strictly capped at a **maximum of 3 classes per day**. You can restrict them further (e.g., 0, 1, or 2) below.")
     col_config = {"Type": st.column_config.SelectboxColumn("Type", options=["Full-Time", "Adjunct"], required=True)}
-    for day in days_ordered:
-        col_config[f"{day} Max"] = st.column_config.NumberColumn(f"{day} Max", min_value=0, max_value=3, step=1)
+    for day in days_ordered: col_config[f"{day} Max"] = st.column_config.NumberColumn(f"{day} Max", min_value=0, max_value=3, step=1)
     
     edited_faculty = st.data_editor(st.session_state.base_fac_df, num_rows="dynamic", column_config=col_config, use_container_width=True, key="fac_editor_widget")
     st.session_state.latest_fac_df_dict = edited_faculty.to_dict('records')
@@ -231,18 +213,18 @@ if course_file:
                     st.rerun()
 
     with tab_sunmon:
-        st.write("**Force Classes to Sunday & Monday**")
-        st.info("⚠️ Faculty selected here will have exactly 3 classes scheduled on Sunday and up to 3 on Monday. If they have more than 6 classes, the remaining will spill over into other days based on your Limits Matrix. This will NOT block other days artificially.")
+        st.write("**Magnetic Pull to Sunday & Monday**")
+        st.info("⚠️ Faculty selected here will be highly prioritized to fill their Sunday and Monday slots up to their daily limit. They will safely spill over into other days if they have extra classes without crashing the system.")
         col_sm1, col_sm2 = st.columns([1, 2])
         with col_sm1:
             sm_fac = st.selectbox("Select Faculty:", available_faculties, key="sm_fac_sel")
-            if st.button("➕ Force Sun/Mon Load"):
+            if st.button("➕ Prioritize Sun/Mon Load"):
                 if sm_fac not in st.session_state.sun_mon_facs:
                     st.session_state.sun_mon_facs.append(sm_fac)
                     st.rerun()
         with col_sm2:
             if st.session_state.sun_mon_facs:
-                st.write("**Currently Forced Faculties:**", st.session_state.sun_mon_facs)
+                st.write("**Currently Prioritized Faculties:**", st.session_state.sun_mon_facs)
                 if st.button("Clear Sun/Mon Locks"):
                     st.session_state.sun_mon_facs = []
                     st.rerun()
@@ -279,22 +261,22 @@ if course_file:
 
     # --- AUTO-FIX DASHBOARD (Shows only if fixes are pending) ---
     if st.session_state.pending_fix_data is not None:
-        st.error("❌ **Strict constraints produced a mathematical contradiction.**")
-        st.info("💡 **Diagnostic AI Found a Fix!** To physically make this schedule work, the engine successfully generated a routine by safely overriding the following exact bottlenecks:")
+        st.error("❌ **Strict constraints produced a physical impossibility (Not enough rooms, too many blocked days, etc.).**")
+        st.info("💡 **Diagnostic AI Activated:** To prevent a total crash, the Maximum Coverage AI dropped the classes that physically could not fit into the schedule. Below is the list of unscheduled courses.")
         
         for v in st.session_state.pending_violations:
             st.warning(v)
             
         col_acc, col_rej = st.columns(2)
         with col_acc:
-            if st.button("✅ Accept Fixes & Apply Routine", type="primary", use_container_width=True):
+            if st.button("✅ Accept Partial Routine & Continue", type="primary", use_container_width=True):
                 st.session_state.preview_data = st.session_state.pending_fix_data
                 st.session_state.routine_history = [copy.deepcopy(st.session_state.pending_fix_data)]
                 st.session_state.pending_fix_data = None
                 st.session_state.pending_violations = []
                 st.rerun()
         with col_rej:
-            if st.button("❌ Reject & Adjust Manually", use_container_width=True):
+            if st.button("❌ Reject & Adjust Limits Manually", use_container_width=True):
                 st.session_state.pending_fix_data = None
                 st.session_state.pending_violations = []
                 st.rerun()
@@ -323,21 +305,20 @@ if course_file:
         batch_counts = {}
         for t in master_tasks: batch_counts[t["Batch"]] = batch_counts.get(t["Batch"], 0) + 1
         for b, count in batch_counts.items():
-            if count > 24:
-                diagnostic_errors.append(f"🎓 **BATCH FAILURE:** **{b}** has **{count} classes**. A batch can only take a maximum of 24 classes per week. Please fix the Excel offering sheet.")
+            if count > 24: diagnostic_errors.append(f"🎓 **BATCH FAILURE:** **{b}** has **{count} classes**. A batch can only take a maximum of 24 classes per week.")
                 
         fac_counts = {}
         for t in master_tasks: fac_counts[t["Faculty"]] = fac_counts.get(t["Faculty"], 0) + 1
         for f, count in fac_counts.items():
             if f != "TBA" and count > 18:
-                diagnostic_errors.append(f"👨‍🏫 **FACULTY FAILURE:** **{f}** has **{count} classes**. A faculty can only take a maximum of 3 classes a day (18 per week). Please distribute their load in the Excel sheet.")
+                diagnostic_errors.append(f"👨‍🏫 **FACULTY FAILURE:** **{f}** has **{count} classes**. A faculty can only take a maximum of 3 classes a day (18 per week).")
 
         if diagnostic_errors:
             st.error("🛑 **CRITICAL PRE-GENERATION DIAGNOSTIC FAILED:** The current Excel sheet contains hard mathematical impossibilities.")
             for e in diagnostic_errors: st.warning(e)
             st.stop()
             
-        with st.spinner("Diagnostics Passed! Executing Strict Mathematical Solver..."):
+        with st.spinner("Diagnostics Passed! Executing Mathematical Solver..."):
             
             # --- STRICT SOLVER PASS ---
             model = cp_model.CpModel()
@@ -346,8 +327,7 @@ if course_file:
                 for d in days_ordered:
                     for s in slots_ordered: x[(i, d, s)] = model.NewBoolVar(f"x_{i}_{d}_{s}")
                         
-            for i in range(len(master_tasks)):
-                model.AddExactlyOne(x[(i, d, s)] for d in days_ordered for s in slots_ordered)
+            for i in range(len(master_tasks)): model.AddExactlyOne(x[(i, d, s)] for d in days_ordered for s in slots_ordered)
                 
             for d in days_ordered:
                 for s in slots_ordered:
@@ -374,15 +354,6 @@ if course_file:
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == rule["Faculty"]]
                 if f_indices: model.Add(sum(x[(i, rule["Day"], rule["Slot"])] for i in f_indices) == 1)
 
-            for sm_fac in st.session_state.sun_mon_facs:
-                f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == sm_fac]
-                if f_indices:
-                    tot = len(f_indices)
-                    s_tgt = min(3, tot)
-                    m_tgt = min(3, max(0, tot - s_tgt))
-                    model.Add(sum(x[(i, "Sunday", s)] for i in f_indices for s in slots_ordered) == s_tgt)
-                    model.Add(sum(x[(i, "Monday", s)] for i in f_indices for s in slots_ordered) == m_tgt)
-
             for b_key, rules in st.session_state.batch_rules.items():
                 b_indices = [i for i, t in enumerate(master_tasks) if t["Batch"] == b_key]
                 if not b_indices: continue
@@ -395,6 +366,16 @@ if course_file:
                     model.AddMaxEquality(day_active, [x[(i, d, s)] for i in b_indices for s in slots_ordered])
                     b_active_vars.append(day_active)
                 model.Add(sum(b_active_vars) <= rules["Max Days"])
+
+            # --- MAGNETIC SUN/MON OBJECTIVE (No hard crashes!) ---
+            obj_terms = []
+            for sm_fac in st.session_state.sun_mon_facs:
+                f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == sm_fac]
+                for i in f_indices:
+                    for s in slots_ordered:
+                        obj_terms.append(x[(i, "Sunday", s)] * 10)
+                        obj_terms.append(x[(i, "Monday", s)] * 10)
+            if obj_terms: model.Maximize(sum(obj_terms))
 
             solver = cp_model.CpSolver()
             solver.parameters.max_time_in_seconds = 10.0
@@ -415,30 +396,23 @@ if course_file:
 
             else:
                 # =========================================================
-                # 🛠️ THE AI RELAXATION ALGORITHM (AUTO-FIXER)
+                # 🛠️ THE AI MAX-COVERAGE ALGORITHM (AUTO-FIXER)
                 # =========================================================
-                st.warning("Strict rules caused a bottleneck. Running Diagnostic AI Auto-Fixer...")
+                st.warning("Strict limits caused a bottleneck. Running Maximum Coverage AI to drop unfittable classes...")
                 
                 f_model = cp_model.CpModel()
                 fx = {}
+                is_scheduled = {}
+                
                 for i in range(len(master_tasks)):
+                    is_scheduled[i] = f_model.NewBoolVar(f"is_sched_{i}")
                     for d in days_ordered:
                         for s in slots_ordered: fx[(i, d, s)] = f_model.NewBoolVar(f"fx_{i}_{d}_{s}")
-                            
-                for i in range(len(master_tasks)): f_model.AddExactlyOne(fx[(i, d, s)] for d in days_ordered for s in slots_ordered)
+                    f_model.Add(sum(fx[(i, d, s)] for d in days_ordered for s in slots_ordered) == is_scheduled[i])
                     
-                penalties = []
-                fac_slacks = {}
-                batch_blk_slacks = {}
-                batch_day_slacks = {}
-                room_slacks = {}
-
                 for d in days_ordered:
                     for s in slots_ordered:
-                        r_slk = f_model.NewIntVar(0, 50, f"r_slk_{d}_{s}")
-                        f_model.Add(sum(fx[(i, d, s)] for i in range(len(master_tasks))) <= total_rooms + r_slk)
-                        penalties.append(r_slk * 1000)
-                        room_slacks[(d,s)] = r_slk
+                        f_model.Add(sum(fx[(i, d, s)] for i in range(len(master_tasks))) <= total_rooms)
                         
                         batch_sec_map = {}
                         for i, t in enumerate(master_tasks): batch_sec_map.setdefault(t['Batch'], []).append(i)
@@ -454,82 +428,56 @@ if course_file:
                     if fac_name == "TBA": continue
                     f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == fac_name]
                     for d in days_ordered:
-                        # Absolute hard limit max 3
-                        f_model.Add(sum(fx[(i, d, s)] for i in f_indices for s in slots_ordered) <= 3)
-                        
                         mat_limit = min(3, int(f_row[f"{d} Max"]))
-                        f_slk = f_model.NewIntVar(0, 3, f"fslk_{fac_name}_{d}")
-                        f_model.Add(sum(fx[(i, d, s)] for i in f_indices for s in slots_ordered) <= mat_limit + f_slk)
-                        penalties.append(f_slk * 500)
-                        fac_slacks[(fac_name, d)] = f_slk
+                        f_model.Add(sum(fx[(i, d, s)] for i in f_indices for s in slots_ordered) <= mat_limit)
 
                 for rule in st.session_state.fac_rules:
                     f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == rule["Faculty"]]
-                    if f_indices: f_model.Add(sum(fx[(i, rule["Day"], rule["Slot"])] for i in f_indices) == 1)
-
-                for sm_fac in st.session_state.sun_mon_facs:
-                    f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == sm_fac]
-                    if f_indices:
-                        tot = len(f_indices)
-                        s_tgt = min(3, tot)
-                        m_tgt = min(3, max(0, tot - s_tgt))
-                        sun_slk = f_model.NewIntVar(0, 3, f"sun_slk_{sm_fac}")
-                        mon_slk = f_model.NewIntVar(0, 3, f"mon_slk_{sm_fac}")
-                        f_model.Add(sum(fx[(i, "Sunday", s)] for i in f_indices for s in slots_ordered) >= s_tgt - sun_slk)
-                        f_model.Add(sum(fx[(i, "Monday", s)] for i in f_indices for s in slots_ordered) >= m_tgt - mon_slk)
-                        penalties.extend([sun_slk * 300, mon_slk * 300])
+                    if f_indices: f_model.Add(sum(fx[(i, rule["Day"], rule["Slot"])] for i in f_indices) <= 1)
 
                 for b_key, rules in st.session_state.batch_rules.items():
                     b_indices = [i for i, t in enumerate(master_tasks) if t["Batch"] == b_key]
                     if not b_indices: continue
                     for d in rules["Blocked Days"]:
-                        b_blk_slk = f_model.NewIntVar(0, 4, f"bblk_{b_key}_{d}")
-                        f_model.Add(sum(fx[(i, d, s)] for i in b_indices for s in slots_ordered) <= b_blk_slk)
-                        penalties.append(b_blk_slk * 800)
-                        batch_blk_slacks[(b_key, d)] = b_blk_slk
-                        
+                        for i in b_indices:
+                            for s in slots_ordered: f_model.Add(fx[(i, d, s)] == 0)
                     b_active_vars = []
                     for d in days_ordered:
                         day_active = f_model.NewBoolVar(f"fb_act_{b_key}_{d}")
                         f_model.AddMaxEquality(day_active, [fx[(i, d, s)] for i in b_indices for s in slots_ordered])
                         b_active_vars.append(day_active)
-                    b_day_slk = f_model.NewIntVar(0, 6, f"bdayslk_{b_key}")
-                    f_model.Add(sum(b_active_vars) <= rules["Max Days"] + b_day_slk)
-                    penalties.append(b_day_slk * 400)
-                    batch_day_slacks[b_key] = b_day_slk
+                    f_model.Add(sum(b_active_vars) <= rules["Max Days"])
 
-                f_model.Minimize(sum(penalties))
+                # Maximize scheduled classes + Sun/Mon Bonus
+                f_obj = [is_scheduled[i] * 1000 for i in range(len(master_tasks))]
+                for sm_fac in st.session_state.sun_mon_facs:
+                    f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == sm_fac]
+                    for i in f_indices:
+                        for s in slots_ordered:
+                            f_obj.append(fx[(i, "Sunday", s)] * 10)
+                            f_obj.append(fx[(i, "Monday", s)] * 10)
+                f_model.Maximize(sum(f_obj))
+
                 f_solver = cp_model.CpSolver()
                 f_solver.parameters.max_time_in_seconds = 15.0
                 f_status = f_solver.Solve(f_model)
 
                 if f_status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-                    violations = []
-                    for (d, s), var in room_slacks.items():
-                        if f_solver.Value(var) > 0: violations.append(f"🏢 Required **{f_solver.Value(var)} extra room(s)** on {d} at {s} to prevent a crash.")
-                    for (fac, d), var in fac_slacks.items():
-                        if f_solver.Value(var) > 0: violations.append(f"👨‍🏫 **{fac}** needed **{f_solver.Value(var)} extra class(es)** on {d} beyond the limits set in the matrix to finish their syllabus.")
-                    for (b, d), var in batch_blk_slacks.items():
-                        if f_solver.Value(var) > 0: violations.append(f"🎓 **{b}** had to be scheduled on **{d}** (which was selected as a Blocked Day) to fit within room limits.")
-                    for b, var in batch_day_slacks.items():
-                        if f_solver.Value(var) > 0: violations.append(f"🎓 **{b}** required **{f_solver.Value(var)} extra active day(s)** to fit their classes.")
-
-                    if not violations:
-                        violations.append("🔄 Minor internal conflicts resolved automatically via algorithm relaxation.")
-
+                    dropped_classes = []
                     scheduled_output = []
                     for i, t in enumerate(master_tasks):
-                        for d in days_ordered:
-                            for s in slots_ordered:
-                                if f_solver.Value(fx[(i, d, s)]) == 1:
-                                    assigned_room = st.session_state.fixed_rooms.get(t['Batch_Core'], f"Room {i % total_rooms + 1}")
-                                    scheduled_output.append({"ID": f"Task_{i}", "Batch": t['Batch'], "Batch_Core": t['Batch_Core'], "Section": t['Section'], "Day": d, "Time Slot": s, "Course Code": t['Code'], "Course Title": t['Title'], "Faculty": t['Faculty'], "Room": assigned_room})
+                        if f_solver.Value(is_scheduled[i]) == 1:
+                            for d in days_ordered:
+                                for s in slots_ordered:
+                                    if f_solver.Value(fx[(i, d, s)]) == 1:
+                                        assigned_room = st.session_state.fixed_rooms.get(t['Batch_Core'], f"Room {i % total_rooms + 1}")
+                                        scheduled_output.append({"ID": f"Task_{i}", "Batch": t['Batch'], "Batch_Core": t['Batch_Core'], "Section": t['Section'], "Day": d, "Time Slot": s, "Course Code": t['Code'], "Course Title": t['Title'], "Faculty": t['Faculty'], "Room": assigned_room})
+                        else:
+                            dropped_classes.append(f"❌ **Dropped:** {t['Batch']} | {t['Code']} ({t['Faculty']})")
                     
-                    st.session_state.pending_violations = violations
+                    st.session_state.pending_violations = dropped_classes if dropped_classes else ["No classes dropped. Re-routing succeeded."]
                     st.session_state.pending_fix_data = scheduled_output
                     st.rerun()
-                else:
-                    st.error("❌ Massive Hard Clash Detected. The solver could not generate a routine even with relaxation. Double check your Excel file for massive overlaps.")
 
     # --- 5. INTERACTIVE DASHBOARDS ---
     if st.session_state.preview_data is not None:
