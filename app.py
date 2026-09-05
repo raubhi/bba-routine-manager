@@ -61,7 +61,7 @@ with col_conf2:
 
 st.divider()
 
-# --- 1. DATA UPLOAD & AGGRESSIVE PARSING ---
+# --- 1. DATA UPLOAD & STATEFUL PARSING ---
 st.subheader("1. Data Upload & Master Parsing")
 course_file = st.file_uploader("Upload Fall 2026 Course Offering Sheet", type=["xlsx"])
 
@@ -77,53 +77,80 @@ if course_file:
     df_raw = pd.read_excel(xls, sheet_name=target_sheet, header=None)
     
     parsed_rows = []
-    current_batch = "20th"
+    current_batch = "20th Batch"
+    last_code = None
+    last_title = "Unknown Course"
     
     for idx, row in df_raw.iterrows():
-        row_vals = [str(v).strip() for v in row.values if pd.notna(v)]
+        row_vals = [str(v).strip() for v in row.values if pd.notna(v) and str(v).strip() != '']
         if not row_vals: continue
         row_str = " ".join(row_vals).lower()
         
+        # Clean Batch Extraction (Ignores trailing "Sections: A,B,C" text)
         if "batch" in row_str and len(row_vals) < 4:
             for v in row_vals:
                 if "batch" in v.lower():
-                    current_batch = v.lower().replace("batch", "").strip().title()
+                    m = re.search(r'(\d+(?:st|nd|rd|th)?)', v, flags=re.IGNORECASE)
+                    if m:
+                        num_part = m.group(1).title()
+                        current_batch = f"{num_part} Batch"
+                    else:
+                        current_batch = v.split(',')[0].replace(":", "").replace("Sections", "").strip().title()
             continue
             
         code_val = next((v for v in row_vals if any(c.isdigit() for c in v) and '-' in v and len(v) >= 5), None)
         
-        if code_val and len(row_vals) >= 4:
+        if code_val:
+            last_code = code_val
             code_idx = row_vals.index(code_val)
-            title = row_vals[code_idx + 1] if code_idx + 1 < len(row_vals) else "Unknown Course"
-            
-            # Aggressive Section & Credit Parsing (Catches A, B, C, D, E, F, G, AD, BC)
-            last_val = row_vals[-1].upper()
-            sections = ["A"]
-            if not any(w in last_val for w in ['SEM', 'YEAR', 'CRED', 'TOTAL', 'TH', 'ST', 'ND', 'RD', 'BATCH']):
-                sections = [s.strip() for s in re.split(r'[,\s;&]+', last_val) if s.strip()]
-                search_space = row_vals[code_idx+2:-1] 
+            last_title = row_vals[code_idx + 1] if code_idx + 1 < len(row_vals) else "Unknown Course"
+            data_cells = row_vals[code_idx+2:]
+        else:
+            # Continuation row handler (catches E,F,G,H on new lines missing the course code)
+            if last_code and len(row_vals) >= 1 and not any(kw in row_str for kw in ['major', 'minor', 'total', 'credit', 'batch']):
+                data_cells = row_vals
             else:
-                search_space = row_vals[code_idx+2:]
+                continue
                 
-            teacher = "TBA"
-            for cell in reversed(search_space):
-                cl = cell.lower()
-                if any(w in cl for w in ['semester', 'year', 'cred', 'th', 'st', 'nd', 'rd', 'batch']):
-                    continue 
-                if len(cell) > 2:
-                    teacher = cell
-                    break
-                    
-            for sec in sections:
-                parsed_rows.append({
-                    "Batch_Core": current_batch,
-                    "Batch": f"{current_batch} (Sec {sec})",
-                    "Section": sec,
-                    "Code": code_val,
-                    "Title": title,
-                    "Faculty": teacher,
-                    "Credits": 3 # 1 section = 3 credits mathematically
-                })
+        if not data_cells:
+            data_cells = ["TBA", "A"]
+            
+        # Aggressive Section & Credit Parsing (Catches all sections regardless of format)
+        last_val = str(data_cells[-1]).upper()
+        sections = ["A"]
+        
+        if not any(w in last_val for w in ['SEM', 'YEAR', 'CRED', 'TOTAL', 'BATCH', 'TEACHER']):
+            sec_text = last_val.replace('SECTIONS', '').replace('SECTION', '').replace('SEC', '').replace(':', '')
+            sec_clean = sec_text.replace(',', ' ').replace(';', ' ').replace('&', ' ').replace('AND', ' ').replace('-', ' ')
+            tokens = [t.strip() for t in sec_clean.split() if t.strip()]
+            
+            if all(len(t) <= 3 and t.isalnum() for t in tokens) and len(tokens) > 0:
+                sections = tokens
+                search_space = data_cells[:-1]
+            else:
+                search_space = data_cells
+        else:
+            search_space = data_cells
+                
+        teacher = "TBA"
+        for cell in reversed(search_space):
+            cl = cell.lower()
+            if any(w in cl for w in ['semester', 'year', 'cred', 'th', 'st', 'nd', 'rd', 'batch']):
+                continue 
+            if len(cell) > 2:
+                teacher = cell
+                break
+                
+        for sec in sections:
+            parsed_rows.append({
+                "Batch_Core": current_batch,
+                "Batch": f"{current_batch} (Sec {sec})",
+                "Section": sec,
+                "Code": last_code,
+                "Title": last_title,
+                "Faculty": teacher,
+                "Credits": 3 # 1 section = 3 credits mathematically
+            })
 
     df_tasks = pd.DataFrame(parsed_rows)
 
@@ -368,7 +395,6 @@ if course_file:
                     for d in days_ordered:
                         for s in slots_ordered:
                             if solver.Value(x[(i, d, s)]) == 1:
-                                # Room Assignment Logic
                                 assigned_room = st.session_state.fixed_rooms.get(t['Batch_Core'], f"Room {i % total_rooms + 1}")
                                 scheduled_output.append({
                                     "ID": f"Task_{i}",
@@ -482,7 +508,6 @@ if course_file:
             st.write("### Faculty Workload & Isolated Routines")
             active_facs = sorted(list(set(row["Faculty"] for row in st.session_state.preview_data)))
             
-            # Faculty Profile Generator
             prof_data = []
             for f in active_facs:
                 f_courses = [r for r in st.session_state.preview_data if r["Faculty"] == f]
@@ -536,7 +561,6 @@ if course_file:
                 t1, t2 = task_list[swap_1], task_list[swap_2]
                 clash_found = False
                 
-                # Simple Clash Check
                 for r in st.session_state.preview_data:
                     if r["ID"] not in [t1["ID"], t2["ID"]]:
                         if r["Day"] == t2["Day"] and r["Time Slot"] == t2["Time Slot"]:
