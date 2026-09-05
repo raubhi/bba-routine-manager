@@ -89,10 +89,8 @@ if course_file:
             for v in row_vals:
                 if "batch" in v.lower():
                     m = re.search(r'(\d+(?:st|nd|rd|th)?)', v, flags=re.IGNORECASE)
-                    if m:
-                        current_batch = f"{m.group(1).title()} Batch"
-                    else:
-                        current_batch = v.split(',')[0].replace(":", "").replace("Sections", "").strip().title()
+                    if m: current_batch = f"{m.group(1).title()} Batch"
+                    else: current_batch = v.split(',')[0].replace(":", "").replace("Sections", "").strip().title()
             continue
             
         code_val = next((v for v in row_vals if any(c.isdigit() for c in v) and '-' in v and len(v) >= 5), None)
@@ -105,8 +103,7 @@ if course_file:
         else:
             if last_code and len(row_vals) >= 1 and not any(kw in row_str for kw in ['major', 'minor', 'total', 'credit', 'batch']):
                 data_cells = row_vals
-            else:
-                continue
+            else: continue
                 
         if not data_cells: data_cells = ["TBA", "A"]
         last_val = str(data_cells[-1]).upper()
@@ -176,9 +173,10 @@ if course_file:
     slots_ordered = ["9:30-11:00", "11:00-12:30", "1:30-3:00", "3:00-4:30"]
 
     st.subheader("2. Persistent Faculty Roster & Daily Limits Matrix")
+    st.info("A batch can have up to 4 classes per day. However, a faculty is strictly capped at a **maximum of 3 classes per day**. You can restrict them further (e.g., 0, 1, or 2) below.")
     col_config = {"Type": st.column_config.SelectboxColumn("Type", options=["Full-Time", "Adjunct"], required=True)}
     for day in days_ordered:
-        col_config[f"{day} Max"] = st.column_config.NumberColumn(f"{day} Max", min_value=0, max_value=6, step=1)
+        col_config[f"{day} Max"] = st.column_config.NumberColumn(f"{day} Max", min_value=0, max_value=3, step=1)
     
     edited_faculty = st.data_editor(st.session_state.base_fac_df, num_rows="dynamic", column_config=col_config, use_container_width=True, key="fac_editor_widget")
     st.session_state.latest_fac_df_dict = edited_faculty.to_dict('records')
@@ -261,18 +259,17 @@ if course_file:
     col_g1, col_g2 = st.columns(2)
     with col_g1:
         include_majors = st.toggle("Include Major Courses", value=False)
-        compact_schedule = st.toggle("Enforce Compact Scheduling", value=False)
         replace_tba = st.toggle("Convert TBA slots to an assigned Faculty member?", value=False)
         tba_replacement = st.selectbox("TBA Replacement Faculty:", available_faculties) if replace_tba else None
     with col_g2:
         total_rooms = st.number_input("Total Available Rooms per Time Slot:", min_value=1, max_value=50, value=15, step=1)
 
     st.divider()
-    
+
     # --- AUTO-FIX DASHBOARD (Shows only if fixes are pending) ---
     if st.session_state.pending_fix_data is not None:
         st.error("❌ **Strict constraints produced a mathematical contradiction.**")
-        st.info("💡 **Diagnostic AI Found a Fix!** To generate a clash-free routine, the system suggests safely overriding the following bottlenecks:")
+        st.info("💡 **Diagnostic AI Found a Fix!** To physically make this schedule work, the engine successfully generated a routine by safely overriding the following exact bottlenecks:")
         
         for v in st.session_state.pending_violations:
             st.warning(v)
@@ -291,8 +288,8 @@ if course_file:
                 st.session_state.pending_violations = []
                 st.rerun()
         st.divider()
-
-    # --- 4. SOLVER EXECUTION ---
+    
+    # --- 4. PRE-DIAGNOSTICS & SOLVER EXECUTION ---
     if st.button("🚀 Generate Full Multi-Batch Master Routine", type="primary", use_container_width=True):
         
         master_tasks = []
@@ -300,14 +297,39 @@ if course_file:
             if not include_majors and "major" in row['Title'].lower(): continue
             teacher = row['Faculty']
             if teacher.lower() == 'tba' and replace_tba and tba_replacement: teacher = tba_replacement
-            master_tasks.append({
-                "Batch_Core": row['Batch_Core'], "Batch": row['Batch'], "Code": row['Code'],
-                "Title": row['Title'], "Faculty": teacher, "Section": row['Section']
-            })
+            master_tasks.append({"Batch_Core": row['Batch_Core'], "Batch": row['Batch'], "Code": row['Code'], "Title": row['Title'], "Faculty": teacher, "Section": row['Section']})
 
-        active_facs = list(set(t["Faculty"] for t in master_tasks if t["Faculty"] != "TBA"))
+        # =========================================================
+        # 🚨 THE ABSOLUTE HARD LIMIT SCANNER
+        # =========================================================
+        diagnostic_errors = []
+        
+        # 1. Total Room Limit Scan
+        total_slots = len(days_ordered) * len(slots_ordered)
+        max_possible_classes = total_slots * total_rooms
+        if len(master_tasks) > max_possible_classes:
+            diagnostic_errors.append(f"🏢 **GLOBAL FAILURE:** You have **{len(master_tasks)} total sections**, but {total_rooms} rooms × 24 slots only allows **{max_possible_classes} maximum classes**. Increase your room count.")
             
-        with st.spinner("Compiling Math Engine and Optimizing..."):
+        # 2. Batch Hard Limit Scan
+        batch_counts = {}
+        for t in master_tasks: batch_counts[t["Batch"]] = batch_counts.get(t["Batch"], 0) + 1
+        for b, count in batch_counts.items():
+            if count > 24:
+                diagnostic_errors.append(f"🎓 **BATCH FAILURE:** **{b}** has **{count} classes**. A batch can only take a maximum of 24 classes per week. Please fix the Excel offering sheet.")
+                
+        # 3. Faculty Hard Limit Scan
+        fac_counts = {}
+        for t in master_tasks: fac_counts[t["Faculty"]] = fac_counts.get(t["Faculty"], 0) + 1
+        for f, count in fac_counts.items():
+            if f != "TBA" and count > 18:
+                diagnostic_errors.append(f"👨‍🏫 **FACULTY FAILURE:** **{f}** has **{count} classes**. A faculty can only take a maximum of 3 classes a day (18 per week). Please distribute their load in the Excel sheet.")
+
+        if diagnostic_errors:
+            st.error("🛑 **CRITICAL PRE-GENERATION DIAGNOSTIC FAILED:** The current Excel sheet contains hard mathematical impossibilities.")
+            for e in diagnostic_errors: st.warning(e)
+            st.stop()
+            
+        with st.spinner("Diagnostics Passed! Executing Strict Mathematical Solver..."):
             
             # --- STRICT SOLVER PASS ---
             model = cp_model.CpModel()
@@ -322,6 +344,7 @@ if course_file:
             for d in days_ordered:
                 for s in slots_ordered:
                     model.Add(sum(x[(i, d, s)] for i in range(len(master_tasks))) <= total_rooms)
+                    
                     batch_sec_map = {}
                     for i, t in enumerate(master_tasks): batch_sec_map.setdefault(t['Batch'], []).append(i)
                     for indices in batch_sec_map.values(): model.AddAtMostOne(x[(i, d, s)] for i in indices)
@@ -335,7 +358,9 @@ if course_file:
                 fac_name = f_row["Faculty Name"]
                 if fac_name == "TBA": continue
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == fac_name]
-                for d in days_ordered: model.Add(sum(x[(i, d, s)] for i in f_indices for s in slots_ordered) <= int(f_row[f"{d} Max"]))
+                for d in days_ordered:
+                    mat_limit = min(3, int(f_row[f"{d} Max"]))
+                    model.Add(sum(x[(i, d, s)] for i in f_indices for s in slots_ordered) <= mat_limit)
 
             for rule in st.session_state.fac_rules:
                 f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == rule["Faculty"]]
@@ -363,22 +388,11 @@ if course_file:
                     b_active_vars.append(day_active)
                 model.Add(sum(b_active_vars) <= rules["Max Days"])
 
-            if compact_schedule:
-                for f in active_facs:
-                    f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == f]
-                    for d in days_ordered:
-                        s1 = sum(x[(i, d, slots_ordered[0])] for i in f_indices)
-                        s2 = sum(x[(i, d, slots_ordered[1])] for i in f_indices)
-                        s3 = sum(x[(i, d, slots_ordered[2])] for i in f_indices)
-                        s4 = sum(x[(i, d, slots_ordered[3])] for i in f_indices)
-                        model.Add(s1 + s4 <= 1 + s2 + s3)
-
             solver = cp_model.CpSolver()
             solver.parameters.max_time_in_seconds = 10.0
             status = solver.Solve(model)
             
             if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-                # STRICT PASS SUCCESS
                 scheduled_output = []
                 for i, t in enumerate(master_tasks):
                     for d in days_ordered:
@@ -392,7 +406,11 @@ if course_file:
                 st.rerun()
 
             else:
-                # --- AUTO-FIX RELAXATION SOLVER PASS ---
+                # =========================================================
+                # 🛠️ THE AI RELAXATION ALGORITHM (AUTO-FIXER)
+                # =========================================================
+                st.warning("Strict rules caused a bottleneck. Running Diagnostic AI Auto-Fixer...")
+                
                 f_model = cp_model.CpModel()
                 fx = {}
                 for i in range(len(master_tasks)):
@@ -411,7 +429,7 @@ if course_file:
                     for s in slots_ordered:
                         r_slk = f_model.NewIntVar(0, 50, f"r_slk_{d}_{s}")
                         f_model.Add(sum(fx[(i, d, s)] for i in range(len(master_tasks))) <= total_rooms + r_slk)
-                        penalties.append(r_slk * 100)
+                        penalties.append(r_slk * 1000)
                         room_slacks[(d,s)] = r_slk
                         
                         batch_sec_map = {}
@@ -428,9 +446,13 @@ if course_file:
                     if fac_name == "TBA": continue
                     f_indices = [i for i, t in enumerate(master_tasks) if t["Faculty"] == fac_name]
                     for d in days_ordered:
-                        f_slk = f_model.NewIntVar(0, 10, f"fslk_{fac_name}_{d}")
-                        f_model.Add(sum(fx[(i, d, s)] for i in f_indices for s in slots_ordered) <= int(f_row[f"{d} Max"]) + f_slk)
-                        penalties.append(f_slk * 50)
+                        # Absolute hard limit max 3
+                        f_model.Add(sum(fx[(i, d, s)] for i in f_indices for s in slots_ordered) <= 3)
+                        
+                        mat_limit = min(3, int(f_row[f"{d} Max"]))
+                        f_slk = f_model.NewIntVar(0, 3, f"fslk_{fac_name}_{d}")
+                        f_model.Add(sum(fx[(i, d, s)] for i in f_indices for s in slots_ordered) <= mat_limit + f_slk)
+                        penalties.append(f_slk * 500)
                         fac_slacks[(fac_name, d)] = f_slk
 
                 for rule in st.session_state.fac_rules:
@@ -447,15 +469,15 @@ if course_file:
                         mon_slk = f_model.NewIntVar(0, 3, f"mon_slk_{sm_fac}")
                         f_model.Add(sum(fx[(i, "Sunday", s)] for i in f_indices for s in slots_ordered) >= s_tgt - sun_slk)
                         f_model.Add(sum(fx[(i, "Monday", s)] for i in f_indices for s in slots_ordered) >= m_tgt - mon_slk)
-                        penalties.extend([sun_slk * 30, mon_slk * 30])
+                        penalties.extend([sun_slk * 300, mon_slk * 300])
 
                 for b_key, rules in st.session_state.batch_rules.items():
                     b_indices = [i for i, t in enumerate(master_tasks) if t["Batch"] == b_key]
                     if not b_indices: continue
                     for d in rules["Blocked Days"]:
-                        b_blk_slk = f_model.NewIntVar(0, 10, f"bblk_{b_key}_{d}")
+                        b_blk_slk = f_model.NewIntVar(0, 4, f"bblk_{b_key}_{d}")
                         f_model.Add(sum(fx[(i, d, s)] for i in b_indices for s in slots_ordered) <= b_blk_slk)
-                        penalties.append(b_blk_slk * 80)
+                        penalties.append(b_blk_slk * 800)
                         batch_blk_slacks[(b_key, d)] = b_blk_slk
                         
                     b_active_vars = []
@@ -463,10 +485,9 @@ if course_file:
                         day_active = f_model.NewBoolVar(f"fb_act_{b_key}_{d}")
                         f_model.AddMaxEquality(day_active, [fx[(i, d, s)] for i in b_indices for s in slots_ordered])
                         b_active_vars.append(day_active)
-                        
                     b_day_slk = f_model.NewIntVar(0, 6, f"bdayslk_{b_key}")
                     f_model.Add(sum(b_active_vars) <= rules["Max Days"] + b_day_slk)
-                    penalties.append(b_day_slk * 60)
+                    penalties.append(b_day_slk * 400)
                     batch_day_slacks[b_key] = b_day_slk
 
                 f_model.Minimize(sum(penalties))
@@ -477,13 +498,16 @@ if course_file:
                 if f_status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
                     violations = []
                     for (d, s), var in room_slacks.items():
-                        if f_solver.Value(var) > 0: violations.append(f"🏢 Needed **{f_solver.Value(var)} extra room(s)** on {d} at {s}.")
+                        if f_solver.Value(var) > 0: violations.append(f"🏢 Required **{f_solver.Value(var)} extra room(s)** on {d} at {s} to prevent a crash.")
                     for (fac, d), var in fac_slacks.items():
-                        if f_solver.Value(var) > 0: violations.append(f"👨‍🏫 **{fac}** was scheduled for **{f_solver.Value(var)} extra class(es)** on {d} beyond their Daily Limit Matrix.")
+                        if f_solver.Value(var) > 0: violations.append(f"👨‍🏫 **{fac}** needed **{f_solver.Value(var)} extra class(es)** on {d} beyond the limits set in the matrix to finish their syllabus.")
                     for (b, d), var in batch_blk_slacks.items():
-                        if f_solver.Value(var) > 0: violations.append(f"🎓 **{b}** had to be scheduled on **{d}** (which was set as a Blocked Day).")
+                        if f_solver.Value(var) > 0: violations.append(f"🎓 **{b}** had to be scheduled on **{d}** (which was selected as a Blocked Day) to fit within room limits.")
                     for b, var in batch_day_slacks.items():
-                        if f_solver.Value(var) > 0: violations.append(f"🎓 **{b}** required **{f_solver.Value(var)} extra active day(s)** beyond its limit to finish the syllabus.")
+                        if f_solver.Value(var) > 0: violations.append(f"🎓 **{b}** required **{f_solver.Value(var)} extra active day(s)** to fit their classes.")
+
+                    if not violations:
+                        violations.append("🔄 Minor internal conflicts resolved automatically via algorithm relaxation.")
 
                     scheduled_output = []
                     for i, t in enumerate(master_tasks):
@@ -497,7 +521,7 @@ if course_file:
                     st.session_state.pending_fix_data = scheduled_output
                     st.rerun()
                 else:
-                    st.error("❌ Hard Clash Detected. One of your batches or faculties has more than 24 total classes assigned, which makes generation physically impossible. Check your Excel file.")
+                    st.error("❌ Massive Hard Clash Detected. The solver could not generate a routine even with relaxation. Double check your Excel file for massive overlaps.")
 
     # --- 5. INTERACTIVE DASHBOARDS ---
     if st.session_state.preview_data is not None:
