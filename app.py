@@ -37,6 +37,8 @@ if 'current_file_id' not in st.session_state:
     st.session_state.current_file_id = None
 if 'base_fac_df' not in st.session_state:
     st.session_state.base_fac_df = None
+if 'latest_fac_df_dict' not in st.session_state:
+    st.session_state.latest_fac_df_dict = None
 
 # --- CONFIGURATION MANAGER ---
 st.subheader("💾 Configuration Manager (Save/Load Rules)")
@@ -46,7 +48,8 @@ with col_conf1:
         "fac_rules": st.session_state.fac_rules,
         "batch_rules": st.session_state.batch_rules,
         "sun_mon_facs": st.session_state.sun_mon_facs,
-        "fixed_rooms": st.session_state.fixed_rooms
+        "fixed_rooms": st.session_state.fixed_rooms,
+        "fac_matrix": st.session_state.latest_fac_df_dict
     }
     st.download_button("📥 Download Saved Rules (.json)", data=json.dumps(config_dict), file_name="bba_routine_rules.json", mime="application/json")
 with col_conf2:
@@ -57,6 +60,13 @@ with col_conf2:
         st.session_state.batch_rules = loaded_conf.get("batch_rules", {})
         st.session_state.sun_mon_facs = loaded_conf.get("sun_mon_facs", [])
         st.session_state.fixed_rooms = loaded_conf.get("fixed_rooms", {})
+        
+        # Restore the faculty matrix limits if they exist in the save file
+        if loaded_conf.get("fac_matrix"):
+            st.session_state.base_fac_df = pd.DataFrame(loaded_conf["fac_matrix"])
+            if "fac_editor_widget" in st.session_state:
+                del st.session_state["fac_editor_widget"]
+                
         st.success("Rules loaded successfully!")
 
 st.divider()
@@ -86,7 +96,6 @@ if course_file:
         if not row_vals: continue
         row_str = " ".join(row_vals).lower()
         
-        # Clean Batch Extraction (Ignores trailing "Sections: A,B,C" text)
         if "batch" in row_str and len(row_vals) < 4:
             for v in row_vals:
                 if "batch" in v.lower():
@@ -106,7 +115,6 @@ if course_file:
             last_title = row_vals[code_idx + 1] if code_idx + 1 < len(row_vals) else "Unknown Course"
             data_cells = row_vals[code_idx+2:]
         else:
-            # Continuation row handler (catches E,F,G,H on new lines missing the course code)
             if last_code and len(row_vals) >= 1 and not any(kw in row_str for kw in ['major', 'minor', 'total', 'credit', 'batch']):
                 data_cells = row_vals
             else:
@@ -115,7 +123,6 @@ if course_file:
         if not data_cells:
             data_cells = ["TBA", "A"]
             
-        # Aggressive Section & Credit Parsing (Catches all sections regardless of format)
         last_val = str(data_cells[-1]).upper()
         sections = ["A"]
         
@@ -149,7 +156,7 @@ if course_file:
                 "Code": last_code,
                 "Title": last_title,
                 "Faculty": teacher,
-                "Credits": 3 # 1 section = 3 credits mathematically
+                "Credits": 3
             })
 
     df_tasks = pd.DataFrame(parsed_rows)
@@ -181,6 +188,8 @@ if course_file:
             fac_df[f"{day} Max"] = 3
             
         st.session_state.base_fac_df = fac_df
+        if "fac_editor_widget" in st.session_state:
+            del st.session_state["fac_editor_widget"]
 
     days_ordered = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
     slots_ordered = ["9:30-11:00", "11:00-12:30", "1:30-3:00", "3:00-4:30"]
@@ -190,9 +199,17 @@ if course_file:
     for day in days_ordered:
         col_config[f"{day} Max"] = st.column_config.NumberColumn(f"{day} Max", min_value=0, max_value=6, step=1)
     
-    edited_faculty = st.data_editor(st.session_state.base_fac_df, num_rows="dynamic", column_config=col_config, use_container_width=True)
-    st.session_state.base_fac_df = edited_faculty 
+    # Render with a key to prevent reset loops
+    edited_faculty = st.data_editor(
+        st.session_state.base_fac_df, 
+        num_rows="dynamic", 
+        column_config=col_config, 
+        use_container_width=True, 
+        key="fac_editor_widget"
+    )
     
+    # Store edits cleanly for JSON save/load 
+    st.session_state.latest_fac_df_dict = edited_faculty.to_dict('records')
     available_faculties = edited_faculty[edited_faculty['Faculty Name'] != 'TBA']['Faculty Name'].tolist()
     
     st.divider()
